@@ -59,7 +59,7 @@ interface GroupViewProps {
 }
 
 export default function GroupView({ groupId, user, onBack, theme }: GroupViewProps) {
-  const { db } = useApexStream();
+  const { db, accessToken } = useApexStream();
   const [group, setGroup] = useState<Group | null>(null);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [members, setMembers] = useState<GroupMember[]>([]);
@@ -213,18 +213,18 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
 
   const handleAddExpense = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!amount || !description || !db) return;
+    if (!amount || !description || !accessToken) return;
 
     try {
       if (editingExpense) {
-        await updateExpense(db, editingExpense.id, {
+        await updateExpense(accessToken, editingExpense.id, {
           amount: parseFloat(amount),
           description: description.trim(),
           category,
           date: dateToIso(new Date(date)),
         });
       } else {
-        await createExpense(db, groupId, user, {
+        await createExpense(accessToken, groupId, user, {
           amount: parseFloat(amount),
           description: description.trim(),
           category,
@@ -252,9 +252,9 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
   };
 
   const handleDeleteExpense = async (id: string) => {
-    if (!db) return;
+    if (!accessToken) return;
     try {
-      await deleteExpenseDoc(db, id);
+      await deleteExpenseDoc(accessToken, id);
       setExpenseToDelete(null);
     } catch (error) {
       handleDbError(error, OperationType.DELETE, `expenses/${id}`, user.uid);
@@ -262,9 +262,9 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
   };
 
   const handleDeleteGroup = async () => {
-    if (!db) return;
+    if (!db || !accessToken) return;
     try {
-      await deleteGroup(db, groupId);
+      await deleteGroup(db, accessToken, groupId);
       onBack();
     } catch (error) {
       handleDbError(error, OperationType.DELETE, `groups/${groupId}`, user.uid);
@@ -273,10 +273,10 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
 
   const handleUpdateSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editName.trim() || !db) return;
+    if (!editName.trim() || !accessToken) return;
 
     try {
-      await updateGroup(db, groupId, {
+      await updateGroup(accessToken, groupId, {
         name: editName.trim(),
         description: editDescription.trim(),
         maxBudget: editMaxBudget ? parseFloat(editMaxBudget) : undefined,

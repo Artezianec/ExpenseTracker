@@ -32,7 +32,7 @@ import GroupView from './components/GroupView';
 import CreateGroupModal from './components/CreateGroupModal';
 
 export default function BudgetedApp() {
-  const { user, signOut, connectionStatus, channel, db } = useApexStream();
+  const { user, signOut, connectionStatus, channel, db, accessToken } = useApexStream();
   const [groups, setGroups] = useState<Group[]>([]);
   const [lastError, setLastError] = useState<string | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
@@ -71,7 +71,7 @@ export default function BudgetedApp() {
   }, []);
 
   useEffect(() => {
-    if (!user || !db) return;
+    if (!user || !db || !accessToken) return;
 
     const hasSeenWelcome = localStorage.getItem(`hasSeenWelcome_${user.uid}`);
     if (!hasSeenWelcome) {
@@ -86,14 +86,14 @@ export default function BudgetedApp() {
           createdAt &&
           Date.now() - new Date(createdAt).getTime() > 24 * 60 * 60 * 1000
         ) {
-          await resetDemoUserData(db, user.uid);
+          await resetDemoUserData(db, accessToken, user.uid);
           setDataDeletedPopup(true);
         }
       } catch (error) {
         console.error('Error resetting demo data:', error);
       }
     })();
-  }, [user, db]);
+  }, [user, db, accessToken]);
 
   useEffect(() => {
     if (!user || !db) {

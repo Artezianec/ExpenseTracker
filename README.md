@@ -15,20 +15,23 @@ Patterns follow [apexstream/examples](https://github.com/apexstream/examples) (`
 1. Install dependencies: `npm install`
 2. Copy `.env.example` to `.env.local` and fill in ApexStream keys from your dashboard
 3. Optional: set `GEMINI_API_KEY` for AI spending insights
-4. Start: `npm run dev`
+4. Start **two processes** (writes need the Budget API server):
+   - Terminal 1: `npm run dev:server` (uses `APEXSTREAM_SECRET_KEY=sk_live_…`)
+   - Terminal 2: `npm run dev`
+   - Or: `npm run dev:all`
 
 ### Environment variables
 
-| Variable | Purpose |
-|----------|---------|
-| `VITE_APEXSTREAM_APP_ID` | App id (auth) |
-| `VITE_APEXSTREAM_PUBLISHABLE_KEY` | Publishable key `pk_live_…` (auth) |
-| `VITE_APEXSTREAM_CONTROL_PLANE_URL` | Control plane HTTP |
-| `VITE_APEXSTREAM_WS_URL` | Gateway WebSocket `…/v1/ws` |
-| `VITE_APEXSTREAM_API_KEY` | Read/subscribe key `pk_live_…` |
-| `VITE_APEXSTREAM_SECRET_KEY` | Optional write key `sk_live_…` for browser CRUD in dev |
+| Variable | Where | Purpose |
+|----------|-------|---------|
+| `VITE_APEXSTREAM_APP_ID` | browser | App id (auth) |
+| `VITE_APEXSTREAM_PUBLISHABLE_KEY` | browser | Publishable key `pk_live_…` (auth) |
+| `VITE_APEXSTREAM_CONTROL_PLANE_URL` | browser | Control plane HTTP |
+| `VITE_APEXSTREAM_WS_URL` | browser | Gateway WebSocket `…/v1/ws` |
+| `VITE_APEXSTREAM_API_KEY` | browser | Read/subscribe key `pk_live_…` |
+| `APEXSTREAM_SECRET_KEY` | **server only** | Write key `sk_live_…` for Budget API |
 
-For production writes, prefer a backend with `sk_live_` as in the document-db example.
+Browser reads + live `db.*` subscriptions use `pk_live_`. All mutations go through `server/index.mjs`, which verifies the user session and writes with `sk_live_` (see [document-db example](https://github.com/apexstream/examples/tree/main/document-db)).
 
 ## Data model (ApexStream Document DB)
 

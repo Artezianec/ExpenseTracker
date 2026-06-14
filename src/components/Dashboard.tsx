@@ -46,7 +46,7 @@ interface DashboardExpense extends Expense {
 }
 
 export default function Dashboard({ user, groups, onSelectGroup, theme }: DashboardProps) {
-  const { db } = useApexStream();
+  const { db, accessToken } = useApexStream();
   const [recentExpenses, setRecentExpenses] = useState<DashboardExpense[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [isGroupsListOpen, setIsGroupsListOpen] = useState(false);
@@ -101,11 +101,11 @@ export default function Dashboard({ user, groups, onSelectGroup, theme }: Dashbo
 
   const handleUpdateExpense = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingExpense || !db) return;
+    if (!editingExpense || !accessToken) return;
 
     setIsSaving(true);
     try {
-      await updateExpense(db, editingExpense.id, {
+      await updateExpense(accessToken, editingExpense.id, {
         amount: parseFloat(editAmount),
         description: editDescription,
         category: editCategory,
@@ -120,11 +120,11 @@ export default function Dashboard({ user, groups, onSelectGroup, theme }: Dashbo
   };
 
   const handleDeleteExpense = async () => {
-    if (!expenseToDelete || !db) return;
+    if (!expenseToDelete || !accessToken) return;
 
     setIsDeleting(true);
     try {
-      await deleteExpense(db, expenseToDelete.id);
+      await deleteExpense(accessToken, expenseToDelete.id);
       setExpenseToDelete(null);
     } catch (error) {
       handleDbError(error, OperationType.DELETE, `expenses/${expenseToDelete.id}`, user.uid);

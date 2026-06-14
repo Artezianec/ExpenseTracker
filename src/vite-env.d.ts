@@ -8,6 +8,7 @@ interface ImportMetaEnv {
   readonly VITE_APEXSTREAM_PUBLISHABLE_KEY: string;
   readonly VITE_APEXSTREAM_CHANNEL: string;
   readonly VITE_APEXSTREAM_ALLOW_INSECURE: string;
+  readonly VITE_BUDGET_API_URL: string;
 }
 
 interface ImportMeta {

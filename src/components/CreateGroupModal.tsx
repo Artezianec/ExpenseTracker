@@ -14,7 +14,7 @@ interface CreateGroupModalProps {
 }
 
 export default function CreateGroupModal({ isOpen, onClose, user }: CreateGroupModalProps) {
-  const { db } = useApexStream();
+  const { accessToken } = useApexStream();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [type, setType] = useState<GroupType>('household');
@@ -34,11 +34,11 @@ export default function CreateGroupModal({ isOpen, onClose, user }: CreateGroupM
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || isSubmitting || !db) return;
+    if (!name.trim() || isSubmitting || !accessToken) return;
 
     setIsSubmitting(true);
     try {
-      const groupId = await createGroup(db, user, {
+      const groupId = await createGroup(accessToken, user, {
         name: name.trim(),
         description: description.trim(),
         type,
@@ -183,7 +183,7 @@ export default function CreateGroupModal({ isOpen, onClose, user }: CreateGroupM
 
                 <button
                   type="submit"
-                  disabled={isSubmitting || !db}
+                  disabled={isSubmitting || !accessToken}
                   className="w-full py-5 bg-gradient-to-br from-indigo-600 to-violet-600 text-white rounded-2xl font-bold hover:from-indigo-700 hover:to-violet-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-4 shadow-xl shadow-indigo-500/20 active:scale-[0.98] outline-none focus:ring-4 focus:ring-indigo-500/40"
                 >
                   {isSubmitting ? 'Creating...' : 'Create Group'}

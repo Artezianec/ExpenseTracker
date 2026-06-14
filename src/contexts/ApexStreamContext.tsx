@@ -17,7 +17,6 @@ import {
   apexConfig,
   apexWsConfigured,
   getAllowInsecureTransport,
-  resolveDbApiKey,
 } from '../lib/apexstream';
 import { ensureUserProfile } from '../lib/budgetDb';
 import { sessionToAppUser } from '../lib/user';
@@ -27,6 +26,7 @@ type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnected' | '
 
 interface ApexStreamContextValue {
   session: AppAuthSession | null;
+  accessToken: string | null;
   user: AppUser | null;
   loading: boolean;
   authConfigured: boolean;
@@ -95,12 +95,10 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
       try {
         const wsUrl = apexConfig.wsUrl;
         const allowInsecure = getAllowInsecureTransport(wsUrl);
-        const dbApiKey = resolveDbApiKey(session.accessToken);
-
         const c = new ApexStreamClient({
           url: wsUrl,
           jwt: await apexAuth.issueRealtimeToken(),
-          apiKey: apexConfig.apiKey || dbApiKey,
+          apiKey: apexConfig.apiKey,
           allowInsecureTransport: allowInsecure,
         });
 
@@ -111,7 +109,7 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
 
         const database = new ApexStreamDatabase({
           controlPlaneUrl: apexConfig.controlPlaneUrl,
-          apiKey: dbApiKey,
+          apiKey: apexConfig.apiKey,
           realtimeClient: c,
         });
 
@@ -191,6 +189,7 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
   const value = useMemo(
     () => ({
       session,
+      accessToken: session?.accessToken ?? null,
       user,
       loading,
       authConfigured: apexAuthConfigured,

@@ -7,6 +7,7 @@ import type {
   GroupMember,
   UserProfile,
 } from '../types';
+import { dbDelete, dbPatch, dbSet } from './dbApi';
 import { dateToIso, nowIso } from './dates';
 import { sessionToAppUser } from './user';
 
@@ -36,12 +37,12 @@ export async function ensureUserProfile(
   session: AppAuthSession,
 ): Promise<AppUser> {
   const appUser = sessionToAppUser(session);
-  const ref = db.collection(COLLECTIONS.users).doc(appUser.uid);
+  const accessToken = session.accessToken;
 
   try {
-    const existing = await ref.get();
+    const existing = await db.collection(COLLECTIONS.users).doc(appUser.uid).get();
     const data = docData<UserProfile>(existing);
-    await ref.patch({
+    await dbPatch(accessToken, COLLECTIONS.users, appUser.uid, {
       displayName: appUser.displayName ?? data.displayName,
       email: appUser.email ?? data.email,
       photoURL: appUser.photoURL ?? data.photoURL,
@@ -54,7 +55,7 @@ export async function ensureUserProfile(
       photoURL: appUser.photoURL,
       createdAt: nowIso(),
     };
-    await ref.set(asRecord(profile));
+    await dbSet(accessToken, COLLECTIONS.users, appUser.uid, asRecord(profile));
   }
 
   return appUser;
@@ -189,7 +190,7 @@ export function subscribeToGroupMembers(
 }
 
 export async function createGroup(
-  db: ApexStreamDatabase,
+  accessToken: string,
   user: AppUser,
   input: {
     name: string;
@@ -214,34 +215,35 @@ export async function createGroup(
       : {}),
   };
 
-  await db.collection(COLLECTIONS.groups).doc(groupId).set(asRecord(group));
-  await db
-    .collection(COLLECTIONS.members)
-    .doc(memberDocId(groupId, user.uid))
-    .set(
-      asRecord({
-        groupId,
-        uid: user.uid,
-        role: 'admin',
-        joinedAt: createdAt,
-        displayName: user.displayName,
-        email: user.email,
-      }),
-    );
+  await dbSet(accessToken, COLLECTIONS.groups, groupId, asRecord(group));
+  await dbSet(
+    accessToken,
+    COLLECTIONS.members,
+    memberDocId(groupId, user.uid),
+    asRecord({
+      groupId,
+      uid: user.uid,
+      role: 'admin',
+      joinedAt: createdAt,
+      displayName: user.displayName,
+      email: user.email,
+    }),
+  );
 
   return groupId;
 }
 
 export async function updateGroup(
-  db: ApexStreamDatabase,
+  accessToken: string,
   groupId: string,
   data: Partial<Pick<Group, 'name' | 'description' | 'maxBudget' | 'budgetType'>>,
 ): Promise<void> {
-  await db.collection(COLLECTIONS.groups).doc(groupId).patch(data);
+  await dbPatch(accessToken, COLLECTIONS.groups, groupId, data);
 }
 
 export async function deleteGroup(
   db: ApexStreamDatabase,
+  accessToken: string,
   groupId: string,
 ): Promise<void> {
   const [expenses, members] = await Promise.all([
@@ -250,18 +252,16 @@ export async function deleteGroup(
   ]);
 
   await Promise.all([
-    ...expenses.map((e) =>
-      db.collection(COLLECTIONS.expenses).doc(e.id).delete(),
-    ),
+    ...expenses.map((e) => dbDelete(accessToken, COLLECTIONS.expenses, e.id)),
     ...members.map((m) =>
-      db.collection(COLLECTIONS.members).doc(memberDocId(groupId, m.uid)).delete(),
+      dbDelete(accessToken, COLLECTIONS.members, memberDocId(groupId, m.uid)),
     ),
-    db.collection(COLLECTIONS.groups).doc(groupId).delete(),
+    dbDelete(accessToken, COLLECTIONS.groups, groupId),
   ]);
 }
 
 export async function createExpense(
-  db: ApexStreamDatabase,
+  accessToken: string,
   groupId: string,
   user: AppUser,
   input: {
@@ -285,33 +285,34 @@ export async function createExpense(
     splitType: 'equal',
   };
 
-  await db.collection(COLLECTIONS.expenses).doc(expenseId).set(asRecord(expense));
+  await dbSet(accessToken, COLLECTIONS.expenses, expenseId, asRecord(expense));
   return expenseId;
 }
 
 export async function updateExpense(
-  db: ApexStreamDatabase,
+  accessToken: string,
   expenseId: string,
   data: Partial<Pick<Expense, 'amount' | 'description' | 'category' | 'date'>>,
 ): Promise<void> {
-  await db.collection(COLLECTIONS.expenses).doc(expenseId).patch(data);
+  await dbPatch(accessToken, COLLECTIONS.expenses, expenseId, data);
 }
 
 export async function deleteExpense(
-  db: ApexStreamDatabase,
+  accessToken: string,
   expenseId: string,
 ): Promise<void> {
-  await db.collection(COLLECTIONS.expenses).doc(expenseId).delete();
+  await dbDelete(accessToken, COLLECTIONS.expenses, expenseId);
 }
 
 export async function resetDemoUserData(
   db: ApexStreamDatabase,
+  accessToken: string,
   userId: string,
 ): Promise<void> {
   const groups = await listUserGroups(db, userId);
   const owned = groups.filter((g) => g.createdBy === userId);
-  await Promise.all(owned.map((g) => deleteGroup(db, g.id)));
-  await db.collection(COLLECTIONS.users).doc(userId).patch({ createdAt: nowIso() });
+  await Promise.all(owned.map((g) => deleteGroup(db, accessToken, g.id)));
+  await dbPatch(accessToken, COLLECTIONS.users, userId, { createdAt: nowIso() });
 }
 
 function toMillis(value: string): number {
