@@ -17,12 +17,12 @@ import {
 import { Group, Expense, BudgetType, CATEGORIES } from '../types';
 import { db } from '../firebase';
 import { collection, query, onSnapshot, orderBy, limit, doc, updateDoc, deleteDoc, Timestamp } from 'firebase/firestore';
-import { User } from 'firebase/auth';
+import { AppUser } from '../types';
 import { formatCurrency } from '../utils/format';
 import { handleFirestoreError, OperationType } from '../utils/errorHandling';
 
 interface DashboardProps {
-  user: User;
+  user: AppUser;
   groups: Group[];
   onSelectGroup: (id: string) => void;
   theme: 'light' | 'dark';

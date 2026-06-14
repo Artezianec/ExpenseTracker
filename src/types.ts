@@ -5,12 +5,21 @@ export type SplitType = 'equal' | 'percentage' | 'exact';
 export type MemberRole = 'admin' | 'member';
 export type BudgetType = 'weekly' | 'monthly' | 'total';
 
+export interface AppUser {
+  uid: string;
+  displayName: string | null;
+  email: string | null;
+  photoURL: string | null;
+  emailVerified: boolean;
+}
+
 export interface UserProfile {
   uid: string;
   displayName: string | null;
   email: string | null;
   photoURL: string | null;
   createdAt: Timestamp;
+  apexUserId?: string;
 }
 
 export interface Group {
