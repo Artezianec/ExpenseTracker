@@ -12,11 +12,11 @@ import {
   type AppAuthSession,
 } from '@apexstream/client';
 import {
-  apexAuth,
   apexAuthConfigured,
   apexConfig,
   apexWsConfigured,
   getAllowInsecureTransport,
+  getApexAuth,
 } from '../lib/apexstream';
 import { ensureUserProfile } from '../lib/budgetDb';
 import { sessionToAppUser } from '../lib/user';
@@ -46,7 +46,7 @@ const ApexStreamContext = createContext<ApexStreamContextValue | null>(null);
 
 export function ApexStreamProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<AppAuthSession | null>(() =>
-    apexAuthConfigured ? apexAuth.getSession() : null,
+    apexAuthConfigured ? getApexAuth().getSession() : null,
   );
   const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(apexAuthConfigured);
@@ -62,7 +62,7 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
       return;
     }
 
-    return apexAuth.onAuthStateChange(async (nextSession) => {
+    return getApexAuth().onAuthStateChange(async (nextSession) => {
       setSession(nextSession);
       if (nextSession) {
         try {
@@ -97,7 +97,7 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
         const allowInsecure = getAllowInsecureTransport(wsUrl);
         const c = new ApexStreamClient({
           url: wsUrl,
-          jwt: await apexAuth.issueRealtimeToken(),
+          jwt: await getApexAuth().issueRealtimeToken(),
           apiKey: apexConfig.apiKey,
           allowInsecureTransport: allowInsecure,
         });
@@ -161,18 +161,18 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
   }, [session?.accessToken]);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    await apexAuth.signInWithPassword(email, password);
+    await getApexAuth().signInWithPassword(email, password);
   }, []);
 
   const signUp = useCallback(async (email: string, password: string) => {
-    await apexAuth.signUp(email, password);
+    await getApexAuth().signUp(email, password);
   }, []);
 
   const signOut = useCallback(async () => {
     client?.disconnect();
     setClient(null);
     setDb(null);
-    await apexAuth.signOut();
+    await getApexAuth().signOut();
     setSession(null);
     setUser(null);
     setConnectionStatus('idle');

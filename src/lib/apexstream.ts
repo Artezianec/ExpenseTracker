@@ -28,8 +28,19 @@ export function getAllowInsecureTransport(wsUrl: string): boolean {
   );
 }
 
-export const apexAuth = new ApexStreamAuth({
-  controlPlaneUrl: apexConfig.controlPlaneUrl,
-  appId: apexConfig.appId,
-  publishableKey: apexConfig.publishableKey,
-});
+let authClient: ApexStreamAuth | null = null;
+
+/** Lazily create auth client so missing env vars show the setup UI instead of crashing. */
+export function getApexAuth(): ApexStreamAuth {
+  if (!apexAuthConfigured) {
+    throw new Error('ApexStream Auth is not configured');
+  }
+  if (!authClient) {
+    authClient = new ApexStreamAuth({
+      controlPlaneUrl: apexConfig.controlPlaneUrl,
+      appId: apexConfig.appId,
+      publishableKey: apexConfig.publishableKey,
+    });
+  }
+  return authClient;
+}
