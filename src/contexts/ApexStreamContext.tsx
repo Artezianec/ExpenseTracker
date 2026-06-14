@@ -8,26 +8,25 @@ import React, {
 } from 'react';
 import {
   ApexStreamClient,
+  ApexStreamDatabase,
   type AppAuthSession,
 } from '@apexstream/client';
 import {
-  apexAuth,
   apexAuthConfigured,
   apexConfig,
   apexWsConfigured,
   getAllowInsecureTransport,
+  getApexAuth,
 } from '../lib/apexstream';
-import {
-  ensureFirebaseBridge,
-  sessionToAppUser,
-  signOutFirebaseBridge,
-} from '../lib/firebaseBridge';
+import { ensureUserProfile } from '../lib/budgetDb';
+import { sessionToAppUser } from '../lib/user';
 import type { AppUser } from '../types';
 
 type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
 
 interface ApexStreamContextValue {
   session: AppAuthSession | null;
+  accessToken: string | null;
   user: AppUser | null;
   loading: boolean;
   authConfigured: boolean;
@@ -35,6 +34,7 @@ interface ApexStreamContextValue {
   connectionStatus: ConnectionStatus;
   connectionError: string | null;
   client: ApexStreamClient | null;
+  db: ApexStreamDatabase | null;
   channel: string;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string) => Promise<void>;
@@ -46,7 +46,7 @@ const ApexStreamContext = createContext<ApexStreamContextValue | null>(null);
 
 export function ApexStreamProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<AppAuthSession | null>(() =>
-    apexAuthConfigured ? apexAuth.getSession() : null,
+    apexAuthConfigured ? getApexAuth().getSession() : null,
   );
   const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(apexAuthConfigured);
@@ -54,6 +54,7 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
     useState<ConnectionStatus>('idle');
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [client, setClient] = useState<ApexStreamClient | null>(null);
+  const [db, setDb] = useState<ApexStreamDatabase | null>(null);
 
   useEffect(() => {
     if (!apexAuthConfigured) {
@@ -61,15 +62,14 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
       return;
     }
 
-    return apexAuth.onAuthStateChange(async (nextSession) => {
+    return getApexAuth().onAuthStateChange(async (nextSession) => {
       setSession(nextSession);
       if (nextSession) {
         try {
-          const appUser = await ensureFirebaseBridge(nextSession);
-          setUser(appUser);
-        } catch (error) {
-          console.error('Firebase bridge error:', error);
           setUser(sessionToAppUser(nextSession));
+        } catch (error) {
+          console.error('Auth session error:', error);
+          setUser(null);
         }
       } else {
         setUser(null);
@@ -81,6 +81,7 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
   useEffect(() => {
     if (!session?.accessToken || !apexWsConfigured) {
       setClient(null);
+      setDb(null);
       setConnectionStatus('idle');
       return;
     }
@@ -94,24 +95,23 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
       try {
         const wsUrl = apexConfig.wsUrl;
         const allowInsecure = getAllowInsecureTransport(wsUrl);
-        const useJwt = apexAuthConfigured;
-
-        const c = useJwt
-          ? new ApexStreamClient({
-              url: wsUrl,
-              jwt: await apexAuth.issueRealtimeToken(),
-              allowInsecureTransport: allowInsecure,
-            })
-          : new ApexStreamClient({
-              url: wsUrl,
-              apiKey: apexConfig.apiKey,
-              allowInsecureTransport: allowInsecure,
-            });
+        const c = new ApexStreamClient({
+          url: wsUrl,
+          jwt: await getApexAuth().issueRealtimeToken(),
+          apiKey: apexConfig.apiKey,
+          allowInsecureTransport: allowInsecure,
+        });
 
         if (cancelled) {
           c.disconnect();
           return;
         }
+
+        const database = new ApexStreamDatabase({
+          controlPlaneUrl: apexConfig.controlPlaneUrl,
+          apiKey: apexConfig.apiKey,
+          realtimeClient: c,
+        });
 
         c.on('open', () => {
           if (!cancelled) {
@@ -133,6 +133,14 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
         c.connect();
         wsClient = c;
         setClient(c);
+        setDb(database);
+
+        try {
+          const appUser = await ensureUserProfile(database, session);
+          if (!cancelled) setUser(appUser);
+        } catch (error) {
+          console.error('User profile sync error:', error);
+        }
       } catch (error) {
         if (!cancelled) {
           setConnectionStatus('error');
@@ -147,23 +155,24 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
       cancelled = true;
       wsClient?.disconnect();
       setClient(null);
+      setDb(null);
       setConnectionStatus('disconnected');
     };
   }, [session?.accessToken]);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    await apexAuth.signInWithPassword(email, password);
+    await getApexAuth().signInWithPassword(email, password);
   }, []);
 
   const signUp = useCallback(async (email: string, password: string) => {
-    await apexAuth.signUp(email, password);
+    await getApexAuth().signUp(email, password);
   }, []);
 
   const signOut = useCallback(async () => {
     client?.disconnect();
     setClient(null);
-    await apexAuth.signOut();
-    await signOutFirebaseBridge();
+    setDb(null);
+    await getApexAuth().signOut();
     setSession(null);
     setUser(null);
     setConnectionStatus('idle');
@@ -180,6 +189,7 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
   const value = useMemo(
     () => ({
       session,
+      accessToken: session?.accessToken ?? null,
       user,
       loading,
       authConfigured: apexAuthConfigured,
@@ -187,6 +197,7 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
       connectionStatus,
       connectionError,
       client,
+      db,
       channel: apexConfig.channel,
       signIn,
       signUp,
@@ -200,6 +211,7 @@ export function ApexStreamProvider({ children }: { children: React.ReactNode }) 
       connectionStatus,
       connectionError,
       client,
+      db,
       signIn,
       signUp,
       signOut,

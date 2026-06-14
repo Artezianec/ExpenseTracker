@@ -4,19 +4,6 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { auth, db } from './firebase';
-import {
-  collection,
-  query,
-  onSnapshot,
-  doc,
-  setDoc,
-  serverTimestamp,
-  getDoc,
-  getDocs,
-  deleteDoc,
-  where,
-} from 'firebase/firestore';
 import {
   Plus,
   LogOut,
@@ -34,13 +21,18 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { Group } from './types';
 import { useApexStream } from './contexts/ApexStreamContext';
+import {
+  resetDemoUserData,
+  subscribeToUserGroups,
+} from './lib/budgetDb';
+import { COLLECTIONS } from './lib/budgetDb';
 
 import Dashboard from './components/Dashboard';
 import GroupView from './components/GroupView';
 import CreateGroupModal from './components/CreateGroupModal';
 
 export default function BudgetedApp() {
-  const { user, signOut, connectionStatus, channel } = useApexStream();
+  const { user, signOut, connectionStatus, channel, db, accessToken } = useApexStream();
   const [groups, setGroups] = useState<Group[]>([]);
   const [lastError, setLastError] = useState<string | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
@@ -79,84 +71,51 @@ export default function BudgetedApp() {
   }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || !db || !accessToken) return;
 
     const hasSeenWelcome = localStorage.getItem(`hasSeenWelcome_${user.uid}`);
     if (!hasSeenWelcome) {
       setShowWelcomePopup(true);
     }
 
-    const firebaseUid = auth.currentUser?.uid;
-    if (!firebaseUid) return;
-
-    const userRef = doc(db, 'users', firebaseUid);
-
     (async () => {
       try {
-        const userSnap = await getDoc(userRef);
-        if (!userSnap.exists()) return;
-
-        const data = userSnap.data();
-        const createdAt = data.createdAt?.toDate();
+        const userDoc = await db.collection(COLLECTIONS.users).doc(user.uid).get();
+        const createdAt = userDoc.data.createdAt as string | undefined;
         if (
           createdAt &&
-          Date.now() - createdAt.getTime() > 24 * 60 * 60 * 1000
+          Date.now() - new Date(createdAt).getTime() > 24 * 60 * 60 * 1000
         ) {
-          const groupsQuery = query(
-            collection(db, 'groups'),
-            where('memberIds', 'array-contains', user.uid),
-          );
-          const groupsSnap = await getDocs(groupsQuery);
-          for (const groupDoc of groupsSnap.docs) {
-            if (groupDoc.data().createdBy === user.uid) {
-              await deleteDoc(doc(db, 'groups', groupDoc.id));
-            }
-          }
-          await setDoc(
-            userRef,
-            { ...data, createdAt: serverTimestamp() },
-            { merge: true },
-          );
+          await resetDemoUserData(db, accessToken, user.uid);
           setDataDeletedPopup(true);
         }
       } catch (error) {
         console.error('Error resetting demo data:', error);
       }
     })();
-  }, [user]);
+  }, [user, db, accessToken]);
 
   useEffect(() => {
-    if (!user) {
+    if (!user || !db) {
       setGroups([]);
       return;
     }
 
-    const groupsQuery = query(
-      collection(db, 'groups'),
-      where('memberIds', 'array-contains', user.uid),
-    );
-
-    const unsubscribe = onSnapshot(
-      groupsQuery,
-      (snapshot) => {
+    const unsubscribe = subscribeToUserGroups(
+      db,
+      user.uid,
+      (fetchedGroups) => {
         setLastError(null);
-        const fetchedGroups = snapshot.docs.map(
-          (groupDoc) =>
-            ({
-              id: groupDoc.id,
-              ...groupDoc.data(),
-            }) as Group,
-        );
         setGroups(fetchedGroups);
       },
       (error) => {
         console.error('Error fetching groups:', error);
-        setLastError(error.message);
+        setLastError(error instanceof Error ? error.message : String(error));
       },
     );
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user, db]);
 
   useEffect(() => {
     if (selectedGroupId && !groups.find((g) => g.id === selectedGroupId)) {
@@ -175,6 +134,7 @@ export default function BudgetedApp() {
           <p className="font-bold mb-1 text-indigo-400">DEBUG INFO</p>
           <p>Groups: {groups.length}</p>
           <p>User: {user.uid.slice(0, 8)}...</p>
+          <p>DB: {db ? 'ready' : '…'}</p>
           <p className="flex items-center gap-1 mt-1">
             {wsLive ? (
               <Wifi className="w-3 h-3 text-emerald-400" />
@@ -478,8 +438,8 @@ export default function BudgetedApp() {
                 Welcome!
               </h3>
               <p className="text-zinc-500 dark:text-zinc-400 mb-10 leading-relaxed text-sm">
-                You&apos;re connected via ApexStream Auth with a live WebSocket
-                channel. Track expenses, split bills, and manage shared budgets
+                You&apos;re connected via ApexStream Auth with live Document DB
+                updates. Track expenses, split bills, and manage shared budgets
                 in real time.
               </p>
               <button
