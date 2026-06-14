@@ -59,21 +59,28 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function appUserId() {
+      let userPath = /databases/$(database)/documents/users/$(request.auth.uid);
+      return exists(userPath) && get(userPath).data.keys().hasAny(['apexUserId'])
+        ? get(userPath).data.apexUserId
+        : request.auth.uid;
+    }
+
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
     function isMember(data) {
-      return isAuthenticated() && request.auth.uid in data.get('memberIds', []);
+      return isAuthenticated() && appUserId() in data.get('memberIds', []);
     }
 
     function isGroupMember(groupId) {
-      return isAuthenticated() && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.get('memberIds', []);
+      return isAuthenticated() && appUserId() in get(/databases/$(database)/documents/groups/$(groupId)).data.get('memberIds', []);
     }
 
     function isGroupAdmin(groupId) {
       return isAuthenticated() && 
-        get(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)).data.get('role', '') == 'admin';
+        get(/databases/$(database)/documents/groups/$(groupId)/members/$(appUserId())).data.get('role', '') == 'admin';
     }
 
     function isValidEmail(email) {
@@ -93,7 +100,7 @@ service cloud.firestore {
     // ===============================================================
 
     function isValidUser(data) {
-      return data.get('uid', '') == request.auth.uid &&
+      return (data.get('uid', '') == request.auth.uid || data.get('uid', '') == data.get('apexUserId', '')) &&
              data.get('email', '') is string && isValidEmail(data.get('email', '')) &&
              (data.get('displayName', null) == null || (data.get('displayName', '') is string && data.get('displayName', '').size() <= 100)) &&
              (data.get('photoURL', null) == null || isValidUrl(data.get('photoURL', ''))) &&
@@ -102,7 +109,7 @@ service cloud.firestore {
 
     function isValidGroup(data) {
       return data.get('name', '') is string && data.get('name', '').size() >= 1 &&
-             data.get('createdBy', '') == request.auth.uid &&
+             data.get('createdBy', '') == appUserId() &&
              data.get('memberIds', []) is list && data.get('memberIds', []).size() > 0 &&
              data.get('createdAt', null) != null;
     }
@@ -153,9 +160,9 @@ service cloud.firestore {
     match /groups/{groupId} {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() && isValidGroup(request.resource.data);
-      allow update: if isAuthenticated() && (request.auth.uid in resource.data.memberIds) && 
+      allow update: if isAuthenticated() && (appUserId() in resource.data.memberIds) && 
                     isValidGroup(request.resource.data);
-      allow delete: if isAuthenticated() && resource.data.get('createdBy', '') == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.get('createdBy', '') == appUserId();
 
       // Expenses subcollection
       match /expenses/{expenseId} {
@@ -170,9 +177,9 @@ service cloud.firestore {
         allow read: if isGroupMember(groupId);
         // Allow user to add themselves if they are in memberIds or if an admin adds them
         allow create: if isAuthenticated() && isValidGroupMember(request.resource.data) &&
-                      (isOwner(userId) || isGroupAdmin(groupId));
+                      (appUserId() == userId || isGroupAdmin(groupId));
         allow update: if isGroupAdmin(groupId) && isValidGroupMember(request.resource.data);
-        allow delete: if isGroupAdmin(groupId) || isOwner(userId);
+        allow delete: if isGroupAdmin(groupId) || appUserId() == userId;
       }
     }
   }

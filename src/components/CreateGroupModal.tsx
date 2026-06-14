@@ -3,14 +3,14 @@ import { motion, AnimatePresence } from 'motion/react';
 import { X, Users, Home, Plane, Briefcase } from 'lucide-react';
 import { db } from '../firebase';
 import { collection, addDoc, serverTimestamp, doc, setDoc } from 'firebase/firestore';
-import { User } from 'firebase/auth';
+import { AppUser } from '../types';
 import { GroupType, BudgetType } from '../types';
 import { handleFirestoreError, OperationType } from '../utils/errorHandling';
 
 interface CreateGroupModalProps {
   isOpen: boolean;
   onClose: () => void;
-  user: User;
+  user: AppUser;
 }
 
 export default function CreateGroupModal({ isOpen, onClose, user }: CreateGroupModalProps) {

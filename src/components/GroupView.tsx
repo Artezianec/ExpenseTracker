@@ -51,14 +51,14 @@ import {
   updateDoc,
   arrayUnion
 } from 'firebase/firestore';
-import { User } from 'firebase/auth';
+import { AppUser } from '../types';
 import { Group, Expense, GroupMember, CATEGORIES, BudgetType } from '../types';
 import { formatCurrency } from '../utils/format';
 import { handleFirestoreError, OperationType } from '../utils/errorHandling';
 
 interface GroupViewProps {
   groupId: string;
-  user: User;
+  user: AppUser;
   onBack: () => void;
   theme: 'light' | 'dark';
 }
