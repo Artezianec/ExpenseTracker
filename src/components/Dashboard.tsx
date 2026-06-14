@@ -15,11 +15,17 @@ import {
   X
 } from 'lucide-react';
 import { Group, Expense, BudgetType, CATEGORIES } from '../types';
-import { db } from '../firebase';
-import { collection, query, onSnapshot, orderBy, limit, doc, updateDoc, deleteDoc, Timestamp } from 'firebase/firestore';
 import { AppUser } from '../types';
 import { formatCurrency } from '../utils/format';
-import { handleFirestoreError, OperationType } from '../utils/errorHandling';
+import { handleDbError, OperationType } from '../utils/errorHandling';
+import { useApexStream } from '../contexts/ApexStreamContext';
+import {
+  deleteExpense,
+  listGroupExpenses,
+  subscribeToGroupExpenses,
+  updateExpense,
+} from '../lib/budgetDb';
+import { dateToIso, toDate } from '../lib/dates';
 
 interface DashboardProps {
   user: AppUser;
@@ -40,6 +46,7 @@ interface DashboardExpense extends Expense {
 }
 
 export default function Dashboard({ user, groups, onSelectGroup, theme }: DashboardProps) {
+  const { db } = useApexStream();
   const [recentExpenses, setRecentExpenses] = useState<DashboardExpense[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [isGroupsListOpen, setIsGroupsListOpen] = useState(false);
@@ -76,7 +83,7 @@ export default function Dashboard({ user, groups, onSelectGroup, theme }: Dashbo
       setEditAmount(editingExpense.amount.toString());
       setEditDescription(editingExpense.description);
       setEditCategory(editingExpense.category);
-      setEditDate(editingExpense.date.toDate().toISOString().split('T')[0]);
+      setEditDate(toDate(editingExpense.date).toISOString().split('T')[0]);
     }
   }, [editingExpense]);
 
@@ -94,35 +101,33 @@ export default function Dashboard({ user, groups, onSelectGroup, theme }: Dashbo
 
   const handleUpdateExpense = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingExpense) return;
+    if (!editingExpense || !db) return;
 
     setIsSaving(true);
     try {
-      const expenseRef = doc(db, 'groups', editingExpense.groupId, 'expenses', editingExpense.id);
-      await updateDoc(expenseRef, {
+      await updateExpense(db, editingExpense.id, {
         amount: parseFloat(editAmount),
         description: editDescription,
         category: editCategory,
-        date: Timestamp.fromDate(new Date(editDate)),
+        date: dateToIso(new Date(editDate)),
       });
       setEditingExpense(null);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `groups/${editingExpense.groupId}/expenses/${editingExpense.id}`);
+      handleDbError(error, OperationType.UPDATE, `expenses/${editingExpense.id}`, user.uid);
     } finally {
       setIsSaving(false);
     }
   };
 
   const handleDeleteExpense = async () => {
-    if (!expenseToDelete) return;
+    if (!expenseToDelete || !db) return;
 
     setIsDeleting(true);
     try {
-      const expenseRef = doc(db, 'groups', expenseToDelete.groupId, 'expenses', expenseToDelete.id);
-      await deleteDoc(expenseRef);
+      await deleteExpense(db, expenseToDelete.id);
       setExpenseToDelete(null);
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `groups/${expenseToDelete.groupId}/expenses/${expenseToDelete.id}`);
+      handleDbError(error, OperationType.DELETE, `expenses/${expenseToDelete.id}`, user.uid);
     } finally {
       setIsDeleting(false);
     }
@@ -151,76 +156,84 @@ export default function Dashboard({ user, groups, onSelectGroup, theme }: Dashbo
   };
 
   useEffect(() => {
-    if (groups.length === 0) {
+    if (!db || groups.length === 0) {
       setRecentExpenses([]);
       setAlerts([]);
       return;
     }
 
     const expensesMap = new Map<string, DashboardExpense[]>();
-    
-    const unsubscribes = groups.map(group => {
-      const expensesQuery = query(
-        collection(db, 'groups', group.id, 'expenses'),
-        orderBy('date', 'desc')
-      );
+    let cancelled = false;
 
-      return onSnapshot(expensesQuery, (snapshot) => {
-        const fetchedExpenses = snapshot.docs.map(doc => ({ 
-          id: doc.id, 
-          groupId: group.id,
-          ...doc.data() 
-        } as DashboardExpense));
-        
-        expensesMap.set(group.id, fetchedExpenses);
-        
-        // Combine all expenses from all groups
-        const allExpenses = Array.from(expensesMap.values()).flat();
-        
-        // Sort by date descending
-        allExpenses.sort((a, b) => b.date.toMillis() - a.date.toMillis());
-        
-        // Take top 10
-        setRecentExpenses(allExpenses.slice(0, 10));
-        
-        // Generate alerts based on budgets
-        const newAlerts: Alert[] = [];
-        
-        groups.forEach(g => {
-          if (!g.maxBudget) return;
-          
-          const gExpenses = expensesMap.get(g.id) || [];
-          const currentPeriodExpenses = gExpenses.filter(e => 
-            isDateInCurrentPeriod(e.date.toDate(), g.budgetType || 'total')
-          );
-          
-          const totalSpent = currentPeriodExpenses.reduce((sum, e) => sum + e.amount, 0);
-          
-          if (totalSpent > g.maxBudget) {
-            newAlerts.push({
-              id: `over-budget-${g.id}`,
-              message: `Group "${g.name}" is over its ${g.budgetType || 'total'} budget ($${totalSpent.toFixed(2)} / $${g.maxBudget.toFixed(2)})`,
-              type: 'warning' as const,
-              groupId: g.id
-            });
-          }
-        });
-        
-        setAlerts(newAlerts);
-        
-      }, (error) => {
-        if (error.message.includes('Missing or insufficient permissions')) {
-          // This is expected if the group was just deleted and the listener hasn't been detached yet
-          return;
+    const recompute = () => {
+      if (cancelled) return;
+
+      const allExpenses = Array.from(expensesMap.values()).flat();
+      allExpenses.sort(
+        (a, b) => toDate(b.date).getTime() - toDate(a.date).getTime(),
+      );
+      setRecentExpenses(allExpenses.slice(0, 10));
+
+      const newAlerts: Alert[] = [];
+      groups.forEach((g) => {
+        if (!g.maxBudget) return;
+
+        const gExpenses = expensesMap.get(g.id) || [];
+        const currentPeriodExpenses = gExpenses.filter((e) =>
+          isDateInCurrentPeriod(toDate(e.date), g.budgetType || 'total'),
+        );
+
+        const totalSpent = currentPeriodExpenses.reduce((sum, e) => sum + e.amount, 0);
+
+        if (totalSpent > g.maxBudget) {
+          newAlerts.push({
+            id: `over-budget-${g.id}`,
+            message: `Group "${g.name}" is over its ${g.budgetType || 'total'} budget ($${totalSpent.toFixed(2)} / $${g.maxBudget.toFixed(2)})`,
+            type: 'warning' as const,
+            groupId: g.id,
+          });
         }
-        console.error("Error fetching expenses for group", group.id, error);
       });
-    });
+
+      setAlerts(newAlerts);
+    };
+
+    const unsubscribes = groups.map((group) =>
+      subscribeToGroupExpenses(
+        db,
+        group.id,
+        (fetchedExpenses) => {
+          expensesMap.set(
+            group.id,
+            fetchedExpenses.map((e) => ({ ...e, groupId: group.id })),
+          );
+          recompute();
+        },
+        (error) => {
+          console.error('Error fetching expenses for group', group.id, error);
+        },
+      ),
+    );
+
+    void Promise.all(groups.map((g) => listGroupExpenses(db, g.id)))
+      .then((results) => {
+        results.forEach((fetchedExpenses, i) => {
+          expensesMap.set(
+            groups[i].id,
+            fetchedExpenses.map((e) => ({ ...e, groupId: groups[i].id })),
+          );
+        });
+        recompute();
+      })
+      .catch((error) => {
+        console.error('Error loading expenses:', error);
+      });
 
     return () => {
-      unsubscribes.forEach(unsub => unsub());
+      cancelled = true;
+      unsubscribes.forEach((unsub) => unsub());
     };
-  }, [groups, user.uid]);
+  }, [groups, user.uid, db]);
 
   return (
     <div className="max-w-6xl mx-auto">
@@ -371,7 +384,7 @@ export default function Dashboard({ user, groups, onSelectGroup, theme }: Dashbo
                           <div className="flex flex-wrap items-center gap-2 sm:gap-3 mt-1">
                             <span className="text-[9px] sm:text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider px-2 py-0.5 sm:px-2.5 sm:py-1 bg-indigo-50 dark:bg-indigo-500/10 rounded-lg border border-indigo-100 dark:border-indigo-500/20">{expense.category}</span>
                             <span className="text-[9px] sm:text-[10px] text-zinc-500 font-mono font-bold">
-                              {expense.date.toDate().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                              {toDate(expense.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                             </span>
                             <span className="text-[9px] sm:text-[10px] text-zinc-400 font-medium italic truncate max-w-[100px] sm:max-w-none">
                               in {groups.find(g => g.id === expense.groupId)?.name}

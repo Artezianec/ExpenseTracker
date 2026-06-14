@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Users, Home, Plane, Briefcase } from 'lucide-react';
-import { db } from '../firebase';
-import { collection, addDoc, serverTimestamp, doc, setDoc } from 'firebase/firestore';
 import { AppUser } from '../types';
 import { GroupType, BudgetType } from '../types';
-import { handleFirestoreError, OperationType } from '../utils/errorHandling';
+import { useApexStream } from '../contexts/ApexStreamContext';
+import { createGroup } from '../lib/budgetDb';
+import { handleDbError, OperationType } from '../utils/errorHandling';
 
 interface CreateGroupModalProps {
   isOpen: boolean;
@@ -14,6 +14,7 @@ interface CreateGroupModalProps {
 }
 
 export default function CreateGroupModal({ isOpen, onClose, user }: CreateGroupModalProps) {
+  const { db } = useApexStream();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [type, setType] = useState<GroupType>('household');
@@ -33,36 +34,19 @@ export default function CreateGroupModal({ isOpen, onClose, user }: CreateGroupM
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || isSubmitting) return;
+    if (!name.trim() || isSubmitting || !db) return;
 
     setIsSubmitting(true);
     try {
-      // 1. Create the group
-      const groupData: any = {
+      const groupId = await createGroup(db, user, {
         name: name.trim(),
         description: description.trim(),
         type,
-        createdBy: user.uid,
-        createdAt: serverTimestamp(),
-        memberIds: [user.uid],
-      };
-
-      if (maxBudget && !isNaN(parseFloat(maxBudget))) {
-        groupData.maxBudget = parseFloat(maxBudget);
-        groupData.budgetType = budgetType;
-      }
-
-      const groupRef = await addDoc(collection(db, 'groups'), groupData);
-      console.log(`Group created successfully with ID: ${groupRef.id}`);
-
-      // 2. Add the creator as an admin member
-      await setDoc(doc(db, 'groups', groupRef.id, 'members', user.uid), {
-        uid: user.uid,
-        role: 'admin',
-        joinedAt: serverTimestamp(),
-        displayName: user.displayName,
-        email: user.email,
+        ...(maxBudget && !isNaN(parseFloat(maxBudget))
+          ? { maxBudget: parseFloat(maxBudget), budgetType }
+          : {}),
       });
+      console.log(`Group created successfully with ID: ${groupId}`);
 
       onClose();
       setName('');
@@ -71,7 +55,7 @@ export default function CreateGroupModal({ isOpen, onClose, user }: CreateGroupM
       setMaxBudget('');
       setBudgetType('monthly');
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'groups');
+      handleDbError(error, OperationType.CREATE, 'groups', user.uid);
     } finally {
       setIsSubmitting(false);
     }
@@ -199,7 +183,7 @@ export default function CreateGroupModal({ isOpen, onClose, user }: CreateGroupM
 
                 <button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || !db}
                   className="w-full py-5 bg-gradient-to-br from-indigo-600 to-violet-600 text-white rounded-2xl font-bold hover:from-indigo-700 hover:to-violet-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-4 shadow-xl shadow-indigo-500/20 active:scale-[0.98] outline-none focus:ring-4 focus:ring-indigo-500/40"
                 >
                   {isSubmitting ? 'Creating...' : 'Create Group'}

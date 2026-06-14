@@ -34,27 +34,22 @@ import {
   Cell,
   Legend
 } from 'recharts';
-import { db } from '../firebase';
-import { 
-  collection, 
-  query, 
-  onSnapshot, 
-  orderBy, 
-  doc, 
-  setDoc,
-  addDoc, 
-  deleteDoc, 
-  serverTimestamp, 
-  Timestamp,
-  getDocs,
-  where,
-  updateDoc,
-  arrayUnion
-} from 'firebase/firestore';
 import { AppUser } from '../types';
 import { Group, Expense, GroupMember, CATEGORIES, BudgetType } from '../types';
 import { formatCurrency } from '../utils/format';
-import { handleFirestoreError, OperationType } from '../utils/errorHandling';
+import { handleDbError, OperationType } from '../utils/errorHandling';
+import { useApexStream } from '../contexts/ApexStreamContext';
+import {
+  createExpense,
+  deleteExpense as deleteExpenseDoc,
+  deleteGroup,
+  subscribeToGroup,
+  subscribeToGroupExpenses,
+  subscribeToGroupMembers,
+  updateExpense,
+  updateGroup,
+} from '../lib/budgetDb';
+import { dateToIso, toDate } from '../lib/dates';
 
 interface GroupViewProps {
   groupId: string;
@@ -64,6 +59,7 @@ interface GroupViewProps {
 }
 
 export default function GroupView({ groupId, user, onBack, theme }: GroupViewProps) {
+  const { db } = useApexStream();
   const [group, setGroup] = useState<Group | null>(null);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [members, setMembers] = useState<GroupMember[]>([]);
@@ -143,50 +139,52 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
   const [inviteSuccess, setInviteSuccess] = useState(false);
 
   useEffect(() => {
-    const groupRef = doc(db, 'groups', groupId);
-    const unsubscribeGroup = onSnapshot(groupRef, (doc) => {
-      if (doc.exists()) {
-        const data = doc.data() as Group;
-        setGroup({ id: doc.id, ...data } as Group);
-        setEditName(data.name);
-        setEditDescription(data.description || '');
-        setEditMaxBudget(data.maxBudget?.toString() || '');
-        setEditBudgetType(data.budgetType || 'monthly');
-      }
-    }, (error) => {
-      if (error.message.includes('Missing or insufficient permissions')) return;
-      console.error("Error fetching group:", error);
-    });
+    if (!db) return;
 
-    const expensesQuery = query(collection(db, 'groups', groupId, 'expenses'), orderBy('date', 'desc'));
-    const unsubscribeExpenses = onSnapshot(expensesQuery, (snapshot) => {
-      setExpenses(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Expense)));
-    }, (error) => {
-      if (error.message.includes('Missing or insufficient permissions')) return;
-      console.error("Error fetching expenses:", error);
-    });
+    const unsubscribeGroup = subscribeToGroup(
+      db,
+      groupId,
+      (nextGroup) => {
+        if (nextGroup) {
+          setGroup(nextGroup);
+          setEditName(nextGroup.name);
+          setEditDescription(nextGroup.description || '');
+          setEditMaxBudget(nextGroup.maxBudget?.toString() || '');
+          setEditBudgetType(nextGroup.budgetType || 'monthly');
+        } else {
+          setGroup(null);
+        }
+      },
+      (error) => console.error('Error fetching group:', error),
+    );
 
-    const membersQuery = collection(db, 'groups', groupId, 'members');
-    const unsubscribeMembers = onSnapshot(membersQuery, (snapshot) => {
-      setMembers(snapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() } as GroupMember)));
-    }, (error) => {
-      if (error.message.includes('Missing or insufficient permissions')) return;
-      console.error("Error fetching members:", error);
-    });
+    const unsubscribeExpenses = subscribeToGroupExpenses(
+      db,
+      groupId,
+      setExpenses,
+      (error) => console.error('Error fetching expenses:', error),
+    );
+
+    const unsubscribeMembers = subscribeToGroupMembers(
+      db,
+      groupId,
+      setMembers,
+      (error) => console.error('Error fetching members:', error),
+    );
 
     return () => {
       unsubscribeGroup();
       unsubscribeExpenses();
       unsubscribeMembers();
     };
-  }, [groupId]);
+  }, [groupId, db]);
 
   useEffect(() => {
     if (editingExpense) {
       setAmount(editingExpense.amount.toString());
       setDescription(editingExpense.description);
       setCategory(editingExpense.category);
-      setDate(editingExpense.date.toDate().toISOString().split('T')[0]);
+      setDate(toDate(editingExpense.date).toISOString().split('T')[0]);
       setIsAddExpenseOpen(true);
     } else {
       setAmount('');
@@ -215,31 +213,36 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
 
   const handleAddExpense = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!amount || !description) return;
+    if (!amount || !description || !db) return;
 
     try {
-      const expenseData = {
-        amount: parseFloat(amount),
-        description: description.trim(),
-        category,
-        paidBy: editingExpense ? editingExpense.paidBy : user.uid,
-        date: Timestamp.fromDate(new Date(date)),
-        createdAt: editingExpense ? editingExpense.createdAt : serverTimestamp(),
-        splitType: 'equal' as const
-      };
-
       if (editingExpense) {
-        await updateDoc(doc(db, 'groups', groupId, 'expenses', editingExpense.id), expenseData);
+        await updateExpense(db, editingExpense.id, {
+          amount: parseFloat(amount),
+          description: description.trim(),
+          category,
+          date: dateToIso(new Date(date)),
+        });
       } else {
-        await addDoc(collection(db, 'groups', groupId, 'expenses'), expenseData);
+        await createExpense(db, groupId, user, {
+          amount: parseFloat(amount),
+          description: description.trim(),
+          category,
+          date: new Date(date),
+        });
       }
-      
+
       setIsAddExpenseOpen(false);
       setEditingExpense(null);
       setAmount('');
       setDescription('');
     } catch (error) {
-      handleFirestoreError(error, editingExpense ? OperationType.UPDATE : OperationType.CREATE, `groups/${groupId}/expenses`);
+      handleDbError(
+        error,
+        editingExpense ? OperationType.UPDATE : OperationType.CREATE,
+        `expenses`,
+        user.uid,
+      );
     }
   };
 
@@ -249,38 +252,39 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
   };
 
   const handleDeleteExpense = async (id: string) => {
+    if (!db) return;
     try {
-      await deleteDoc(doc(db, 'groups', groupId, 'expenses', id));
+      await deleteExpenseDoc(db, id);
       setExpenseToDelete(null);
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `groups/${groupId}/expenses/${id}`);
+      handleDbError(error, OperationType.DELETE, `expenses/${id}`, user.uid);
     }
   };
 
   const handleDeleteGroup = async () => {
+    if (!db) return;
     try {
-      await deleteDoc(doc(db, 'groups', groupId));
+      await deleteGroup(db, groupId);
       onBack();
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `groups/${groupId}`);
+      handleDbError(error, OperationType.DELETE, `groups/${groupId}`, user.uid);
     }
   };
 
   const handleUpdateSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editName.trim()) return;
-    
+    if (!editName.trim() || !db) return;
+
     try {
-      const updateData: any = {
+      await updateGroup(db, groupId, {
         name: editName.trim(),
         description: editDescription.trim(),
-        maxBudget: editMaxBudget ? parseFloat(editMaxBudget) : null,
-        budgetType: editMaxBudget ? editBudgetType : 'total'
-      };
-      await updateDoc(doc(db, 'groups', groupId), updateData);
+        maxBudget: editMaxBudget ? parseFloat(editMaxBudget) : undefined,
+        budgetType: editMaxBudget ? editBudgetType : 'total',
+      });
       setIsSettingsOpen(false);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `groups/${groupId}`);
+      handleDbError(error, OperationType.UPDATE, `groups/${groupId}`, user.uid);
     }
   };
 
@@ -307,8 +311,8 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
     return true;
   };
 
-  const currentPeriodExpenses = expenses.filter(e => 
-    isDateInCurrentPeriod(e.date.toDate(), group?.budgetType || 'total')
+  const currentPeriodExpenses = expenses.filter((e) =>
+    isDateInCurrentPeriod(toDate(e.date), group?.budgetType || 'total'),
   );
 
   const totalSpent = currentPeriodExpenses.reduce((sum, e) => sum + e.amount, 0);
@@ -341,8 +345,8 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
         weekEnd.setDate(weekStart.getDate() + 7);
 
         const weekSpent = expenses
-          .filter(e => {
-            const ed = e.date.toDate();
+          .filter((e) => {
+            const ed = toDate(e.date);
             return ed >= weekStart && ed < weekEnd && ed.getFullYear() === currentYear;
           })
           .reduce((sum, e) => sum + e.amount, 0);
@@ -356,8 +360,8 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
       const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
       for (let i = 0; i < 12; i++) {
         const monthSpent = expenses
-          .filter(e => {
-            const ed = e.date.toDate();
+          .filter((e) => {
+            const ed = toDate(e.date);
             return ed.getMonth() === i && ed.getFullYear() === currentYear;
           })
           .reduce((sum, e) => sum + e.amount, 0);
@@ -423,7 +427,7 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
         amount: e.amount,
         description: e.description,
         category: e.category,
-        date: e.date.toDate().toLocaleDateString()
+        date: toDate(e.date).toLocaleDateString()
       }));
 
       const prompt = `
@@ -730,8 +734,8 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                   <div key={expense.id} className="p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between group transition-all duration-200 gap-4 hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
                     <div className="flex items-center gap-4 sm:gap-5 min-w-0">
                       <div className="w-12 h-12 sm:w-14 sm:h-14 bg-zinc-50 dark:bg-zinc-800 rounded-2xl flex flex-col items-center justify-center text-zinc-400 dark:text-zinc-500 border border-zinc-100 dark:border-zinc-700 group-hover:bg-white dark:group-hover:bg-zinc-800 transition-colors shrink-0">
-                        <span className="text-[9px] sm:text-[10px] font-bold uppercase tracking-tighter text-zinc-500">{expense.date.toDate().toLocaleDateString('en-US', { month: 'short' })}</span>
-                        <span className="text-lg sm:text-xl font-bold leading-none text-zinc-900 dark:text-white">{expense.date.toDate().getDate()}</span>
+                        <span className="text-[9px] sm:text-[10px] font-bold uppercase tracking-tighter text-zinc-500">{toDate(expense.date).toLocaleDateString('en-US', { month: 'short' })}</span>
+                        <span className="text-lg sm:text-xl font-bold leading-none text-zinc-900 dark:text-white">{toDate(expense.date).getDate()}</span>
                       </div>
                       <div className="min-w-0">
                         <p className="font-bold text-zinc-900 dark:text-white group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors truncate">{expense.description}</p>

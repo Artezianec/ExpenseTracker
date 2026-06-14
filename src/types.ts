@@ -1,9 +1,10 @@
-import { Timestamp } from 'firebase/firestore';
-
 export type GroupType = 'personal' | 'household' | 'trip' | 'other';
 export type SplitType = 'equal' | 'percentage' | 'exact';
 export type MemberRole = 'admin' | 'member';
 export type BudgetType = 'weekly' | 'monthly' | 'total';
+
+/** ISO 8601 timestamp string stored in ApexStream Document DB. */
+export type DbTimestamp = string;
 
 export interface AppUser {
   uid: string;
@@ -18,8 +19,7 @@ export interface UserProfile {
   displayName: string | null;
   email: string | null;
   photoURL: string | null;
-  createdAt: Timestamp;
-  apexUserId?: string;
+  createdAt: DbTimestamp;
 }
 
 export interface Group {
@@ -27,7 +27,7 @@ export interface Group {
   name: string;
   description?: string;
   createdBy: string;
-  createdAt: Timestamp;
+  createdAt: DbTimestamp;
   type: GroupType;
   memberIds: string[];
   maxBudget?: number;
@@ -36,20 +36,22 @@ export interface Group {
 
 export interface GroupMember {
   uid: string;
+  groupId: string;
   role: MemberRole;
-  joinedAt: Timestamp;
+  joinedAt: DbTimestamp;
   displayName?: string;
   email?: string;
 }
 
 export interface Expense {
   id: string;
+  groupId: string;
   amount: number;
   description: string;
   category: string;
-  paidBy: string; // userId
-  date: Timestamp;
-  createdAt: Timestamp;
+  paidBy: string;
+  date: DbTimestamp;
+  createdAt: DbTimestamp;
   splitType: SplitType;
 }
 
@@ -62,5 +64,5 @@ export const CATEGORIES = [
   'Shopping',
   'Health',
   'Travel',
-  'Other'
+  'Other',
 ];
