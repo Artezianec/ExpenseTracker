@@ -91,6 +91,9 @@ import {
   parseLoanImportFiles,
 } from './loan-import.mjs';
 import {
+  analyzeSpending,
+} from './ai-insights.mjs';
+import {
   checkAiInsightsAvailable,
   getAiInsightsConfig,
 } from './llm.mjs';
