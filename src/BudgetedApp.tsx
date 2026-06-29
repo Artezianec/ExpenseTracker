@@ -3,40 +3,51 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  Plus,
   LogOut,
   LayoutDashboard,
   Settings,
-  ChevronRight,
   Wallet,
   Menu,
   X,
   Sun,
   Moon,
-  Wifi,
-  WifiOff,
+  Tag,
+  Package,
+  Landmark,
+  Shield,
+  Scan,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Group } from './types';
-import { useApexStream } from './contexts/ApexStreamContext';
+import { useAuth } from './contexts/AuthContext';
 import {
+  getUserProfile,
   resetDemoUserData,
   subscribeToUserGroups,
 } from './lib/budgetDb';
-import { COLLECTIONS } from './lib/budgetDb';
 
 import Dashboard from './components/Dashboard';
 import GroupView from './components/GroupView';
+import PurchasesView from './components/PurchasesView';
+import ShoppingView from './components/ShoppingView';
+import CreditsView from './components/CreditsView';
+import InsurancesView from './components/InsurancesView';
 import CreateGroupModal from './components/CreateGroupModal';
+import CategoryManagerModal from './components/CategoryManagerModal';
+import MonthsSidebar from './components/MonthsSidebar';
+import { appPath, parseAppPath, type MainView } from './lib/appNavigation';
 
 export default function BudgetedApp() {
-  const { user, signOut, connectionStatus, channel, db, accessToken } = useApexStream();
+  const { user, signOut } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [groups, setGroups] = useState<Group[]>([]);
   const [lastError, setLastError] = useState<string | null>(null);
-  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isCategoriesOpen, setIsCategoriesOpen] = useState(false);
   const [dataDeletedPopup, setDataDeletedPopup] = useState(false);
   const [showWelcomePopup, setShowWelcomePopup] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -46,6 +57,33 @@ export default function BudgetedApp() {
     }
     return 'dark';
   });
+
+  const { mainView, groupId: selectedGroupId } = useMemo(
+    () => parseAppPath(location.pathname),
+    [location.pathname],
+  );
+
+  const goTo = (view: MainView, groupId: string | null = null) => {
+    navigate(appPath(view, groupId));
+  };
+
+  const selectGroup = (id: string) => {
+    navigate(appPath('dashboard', id));
+    setIsSidebarOpen(false);
+  };
+
+  const leaveGroup = () => {
+    navigate(appPath(mainView));
+  };
+
+  useEffect(() => {
+    const parsed = parseAppPath(location.pathname);
+    const canonical = appPath(parsed.mainView, parsed.groupId);
+    const norm = (p: string) => p.replace(/\/+$/, '') || '/';
+    if (norm(location.pathname) !== norm(canonical)) {
+      navigate(canonical, { replace: true });
+    }
+  }, [location.pathname, navigate]);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -71,7 +109,7 @@ export default function BudgetedApp() {
   }, []);
 
   useEffect(() => {
-    if (!user || !db || !accessToken) return;
+    if (!user) return;
 
     const hasSeenWelcome = localStorage.getItem(`hasSeenWelcome_${user.uid}`);
     if (!hasSeenWelcome) {
@@ -80,29 +118,28 @@ export default function BudgetedApp() {
 
     (async () => {
       try {
-        const userDoc = await db.collection(COLLECTIONS.users).doc(user.uid).get();
-        const createdAt = userDoc.data.createdAt as string | undefined;
+        const profile = await getUserProfile();
+        const createdAt = profile.createdAt;
         if (
           createdAt &&
           Date.now() - new Date(createdAt).getTime() > 24 * 60 * 60 * 1000
         ) {
-          await resetDemoUserData(db, accessToken, user.uid);
+          await resetDemoUserData(user.uid);
           setDataDeletedPopup(true);
         }
       } catch (error) {
         console.error('Error resetting demo data:', error);
       }
     })();
-  }, [user, db, accessToken]);
+  }, [user]);
 
   useEffect(() => {
-    if (!user || !db) {
+    if (!user) {
       setGroups([]);
       return;
     }
 
     const unsubscribe = subscribeToUserGroups(
-      db,
       user.uid,
       (fetchedGroups) => {
         setLastError(null);
@@ -115,34 +152,24 @@ export default function BudgetedApp() {
     );
 
     return () => unsubscribe();
-  }, [user, db]);
+  }, [user]);
 
   useEffect(() => {
-    if (selectedGroupId && !groups.find((g) => g.id === selectedGroupId)) {
-      setSelectedGroupId(null);
+    if (!selectedGroupId || !groups.length) return;
+    if (!groups.find((g) => g.id === selectedGroupId)) {
+      navigate('/', { replace: true });
     }
-  }, [groups, selectedGroupId]);
+  }, [groups, selectedGroupId, navigate]);
 
   if (!user) return null;
-
-  const wsLive = connectionStatus === 'connected';
 
   return (
     <div className="flex h-screen bg-zinc-50 dark:bg-zinc-950 font-sans selection:bg-indigo-100 selection:text-indigo-900 relative overflow-hidden transition-colors duration-300">
       {process.env.NODE_ENV !== 'production' && (
         <div className="fixed bottom-4 right-4 z-[100] bg-black/80 text-white p-4 rounded-2xl text-[10px] font-mono max-w-xs pointer-events-none">
           <p className="font-bold mb-1 text-indigo-400">DEBUG INFO</p>
-          <p>Groups: {groups.length}</p>
+          <p>Months: {groups.length}</p>
           <p>User: {user.uid.slice(0, 8)}...</p>
-          <p>DB: {db ? 'ready' : '…'}</p>
-          <p className="flex items-center gap-1 mt-1">
-            {wsLive ? (
-              <Wifi className="w-3 h-3 text-emerald-400" />
-            ) : (
-              <WifiOff className="w-3 h-3 text-amber-400" />
-            )}
-            WS: {connectionStatus} · {channel}
-          </p>
           {lastError && (
             <p className="text-red-400 mt-2">Error: {lastError}</p>
           )}
@@ -193,80 +220,77 @@ export default function BudgetedApp() {
           <nav className="space-y-1.5">
             <button
               onClick={() => {
-                setSelectedGroupId(null);
+                goTo('dashboard');
                 setIsSidebarOpen(false);
               }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 ${!selectedGroupId ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-950 shadow-xl shadow-zinc-900/10 dark:shadow-white/10' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white'}`}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 ${!selectedGroupId && mainView === 'dashboard' ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-950 shadow-xl shadow-zinc-900/10 dark:shadow-white/10' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white'}`}
             >
               <LayoutDashboard className="w-5 h-5" />
               <span className="font-bold">Dashboard</span>
             </button>
-          </nav>
-
-          <div
-            className={`mt-4 flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-medium ${
-              wsLive
-                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
-            }`}
-          >
-            {wsLive ? (
-              <Wifi className="w-3.5 h-3.5" />
-            ) : (
-              <WifiOff className="w-3.5 h-3.5" />
-            )}
-            {wsLive ? 'Live' : connectionStatus}
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-4 py-2 relative z-10 custom-scrollbar min-h-[200px]">
-          <div className="flex items-center justify-between px-4 mb-4">
-            <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400 dark:text-zinc-500">
-              Your Groups
-            </span>
             <button
               onClick={() => {
-                setIsCreateModalOpen(true);
+                goTo('shop');
                 setIsSidebarOpen(false);
               }}
-              className="p-1.5 hover:bg-zinc-100 dark:hover:bg-white/10 rounded-lg transition-colors text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-white"
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 ${!selectedGroupId && mainView === 'shop' ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-950 shadow-xl shadow-zinc-900/10 dark:shadow-white/10' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white'}`}
             >
-              <Plus className="w-4 h-4" />
+              <Scan className="w-5 h-5" />
+              <span className="font-bold">Shop</span>
             </button>
-          </div>
-
-          <div className="space-y-1">
-            {groups.map((group) => (
-              <button
-                key={group.id}
-                onClick={() => {
-                  setSelectedGroupId(group.id);
-                  setIsSidebarOpen(false);
-                }}
-                className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all duration-300 group ${selectedGroupId === group.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white'}`}
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`w-2 h-2 rounded-full transition-transform group-hover:scale-125 ${group.type === 'personal' ? 'bg-blue-400' : group.type === 'household' ? 'bg-emerald-400' : 'bg-orange-400'}`}
-                  />
-                  <span className="truncate text-sm font-medium">
-                    {group.name}
-                  </span>
-                </div>
-                {selectedGroupId === group.id && (
-                  <ChevronRight className="w-4 h-4 opacity-70" />
-                )}
-              </button>
-            ))}
-            {groups.length === 0 && (
-              <div className="px-4 py-8 text-center">
-                <p className="text-xs text-zinc-400 dark:text-zinc-600 italic">
-                  No groups yet
-                </p>
-              </div>
-            )}
-          </div>
+            <button
+              onClick={() => {
+                goTo('purchases');
+                setIsSidebarOpen(false);
+              }}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 ${!selectedGroupId && mainView === 'purchases' ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-950 shadow-xl shadow-zinc-900/10 dark:shadow-white/10' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white'}`}
+            >
+              <Package className="w-5 h-5" />
+              <span className="font-bold">Products</span>
+            </button>
+            <button
+              onClick={() => {
+                goTo('credits');
+                setIsSidebarOpen(false);
+              }}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 ${!selectedGroupId && mainView === 'credits' ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-950 shadow-xl shadow-zinc-900/10 dark:shadow-white/10' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white'}`}
+            >
+              <Landmark className="w-5 h-5" />
+              <span className="font-bold">Loans</span>
+            </button>
+            <button
+              onClick={() => {
+                goTo('insurances');
+                setIsSidebarOpen(false);
+              }}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 ${!selectedGroupId && mainView === 'insurances' ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-950 shadow-xl shadow-zinc-900/10 dark:shadow-white/10' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white'}`}
+            >
+              <Shield className="w-5 h-5" />
+              <span className="font-bold">Insurance</span>
+            </button>
+            <button
+              onClick={() => {
+                setIsCategoriesOpen(true);
+                setIsSidebarOpen(false);
+              }}
+              className="w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white"
+            >
+              <Tag className="w-5 h-5" />
+              <span className="font-bold">Categories</span>
+            </button>
+          </nav>
         </div>
+
+        <MonthsSidebar
+          groups={groups}
+          selectedGroupId={selectedGroupId}
+          userId={user.uid}
+          onSelectGroup={selectGroup}
+          onCreateMonth={() => {
+            setIsCreateModalOpen(true);
+            setIsSidebarOpen(false);
+          }}
+        />
 
         <div className="p-6 mt-auto relative z-10 shrink-0">
           <div className="p-4 bg-zinc-50 dark:bg-white/5 rounded-2xl border border-zinc-200 dark:border-white/10 mb-4 backdrop-blur-md">
@@ -330,26 +354,7 @@ export default function BudgetedApp() {
           </button>
         </div>
         <AnimatePresence mode="wait">
-          {!selectedGroupId ? (
-            <motion.div
-              key="dashboard"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.3 }}
-              className="p-10 max-w-7xl mx-auto"
-            >
-              <Dashboard
-                user={user}
-                groups={groups}
-                onSelectGroup={(id) => {
-                  setSelectedGroupId(id);
-                  setIsSidebarOpen(false);
-                }}
-                theme={theme}
-              />
-            </motion.div>
-          ) : (
+          {selectedGroupId ? (
             <motion.div
               key={selectedGroupId}
               initial={{ opacity: 0, y: 10 }}
@@ -361,7 +366,71 @@ export default function BudgetedApp() {
               <GroupView
                 groupId={selectedGroupId}
                 user={user}
-                onBack={() => setSelectedGroupId(null)}
+                onBack={leaveGroup}
+                theme={theme}
+              />
+            </motion.div>
+          ) : mainView === 'shop' ? (
+            <motion.div
+              key="shop"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3 }}
+              className="p-4 sm:p-10 max-w-7xl mx-auto"
+            >
+              <ShoppingView
+                groups={groups}
+                defaultGroupId={selectedGroupId}
+                onSelectMonth={selectGroup}
+              />
+            </motion.div>
+          ) : mainView === 'purchases' ? (
+            <motion.div
+              key="purchases"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3 }}
+              className="p-10 max-w-7xl mx-auto"
+            >
+              <PurchasesView onSelectMonth={selectGroup} />
+            </motion.div>
+          ) : mainView === 'insurances' ? (
+            <motion.div
+              key="insurances"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3 }}
+              className="p-10 max-w-7xl mx-auto"
+            >
+              <InsurancesView onSelectMonth={selectGroup} />
+            </motion.div>
+          ) : mainView === 'credits' ? (
+            <motion.div
+              key="credits"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3 }}
+              className="p-10 max-w-7xl mx-auto"
+            >
+              <CreditsView onSelectMonth={selectGroup} />
+            </motion.div>
+          ) : (
+            <motion.div
+              key="dashboard"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3 }}
+              className="p-10 max-w-7xl mx-auto"
+            >
+              <Dashboard
+                user={user}
+                groups={groups}
+                onSelectGroup={selectGroup}
                 theme={theme}
               />
             </motion.div>
@@ -412,6 +481,11 @@ export default function BudgetedApp() {
         user={user}
       />
 
+      <CategoryManagerModal
+        isOpen={isCategoriesOpen}
+        onClose={() => setIsCategoriesOpen(false)}
+      />
+
       <AnimatePresence>
         {showWelcomePopup && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -438,9 +512,8 @@ export default function BudgetedApp() {
                 Welcome!
               </h3>
               <p className="text-zinc-500 dark:text-zinc-400 mb-10 leading-relaxed text-sm">
-                You&apos;re connected via ApexStream Auth with live Document DB
-                updates. Track expenses, split bills, and manage shared budgets
-                in real time.
+                You&apos;re connected to Budgeted. Track expenses, split bills,
+                and manage shared budgets.
               </p>
               <button
                 onClick={() => {

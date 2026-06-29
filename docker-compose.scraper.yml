@@ -1,0 +1,20 @@
+# Scraper sidecar — downloads Israeli supermarket price XML dumps.
+# Requires Docker. Output is mounted to ./data/supermarket-dumps
+#
+# Usage:
+#   docker compose -f docker-compose.scraper.yml up
+#   npm run sync:prices
+
+services:
+  supermarket-scraper:
+    image: erlichsefi/israeli-supermarket-scarpers:latest
+    environment:
+      ENABLED_SCRAPERS: ${ENABLED_SCRAPERS:-SHUFERSAL,RAMI_LEVY,HAZI_HINAM}
+      ENABLED_FILE_TYPES: ${ENABLED_FILE_TYPES:-STORE_FILE,PRICE_FILE}
+      OUTPUT_MODE: disk
+      STORAGE_PATH: /dumps
+      LIMIT: ${SCRAPER_LIMIT:-5}
+      NUMBER_OF_PROCESSES: "2"
+    volumes:
+      - ./data/supermarket-dumps:/dumps
+    restart: "no"

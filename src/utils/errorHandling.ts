@@ -26,6 +26,6 @@ export function handleDbError(
     path,
     userId,
   };
-  console.error('ApexStream DB Error:', JSON.stringify(errInfo));
+  console.error('DB Error:', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
 }

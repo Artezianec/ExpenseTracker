@@ -2,16 +2,15 @@ import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import AuthLayout from '../components/AuthLayout';
-import { useApexStream } from '../contexts/ApexStreamContext';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function RegisterPage() {
   const navigate = useNavigate();
-  const { signUp, user, loading, authConfigured } = useApexStream();
+  const { signUp, user, loading } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -19,20 +18,6 @@ export default function RegisterPage() {
       navigate('/', { replace: true });
     }
   }, [loading, user, navigate]);
-
-  if (!authConfigured) {
-    return (
-      <AuthLayout
-        title="Configuration required"
-        subtitle="Set VITE_APEXSTREAM_APP_ID and VITE_APEXSTREAM_PUBLISHABLE_KEY in your .env file."
-      >
-        <p className="text-sm text-zinc-500">
-          See <code className="font-mono text-xs">.env.example</code> for all
-          required variables.
-        </p>
-      </AuthLayout>
-    );
-  }
 
   if (loading) {
     return (
@@ -45,25 +30,21 @@ export default function RegisterPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    setSuccess('');
 
     if (password !== confirmPassword) {
       setError('Passwords do not match');
       return;
     }
 
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters');
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters');
       return;
     }
 
     setSubmitting(true);
     try {
       await signUp(email, password);
-      setSuccess(
-        'Account created! You can sign in now. In dev, email verification may be skipped.',
-      );
-      setTimeout(() => navigate('/login', { replace: true }), 2000);
+      navigate('/', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed');
     } finally {
@@ -74,7 +55,7 @@ export default function RegisterPage() {
   return (
     <AuthLayout
       title="Create account"
-      subtitle="Register with ApexStream Auth to start tracking shared budgets."
+      subtitle="Create an account to start tracking shared budgets."
       footer={
         <>
           Already have an account?{' '}
@@ -121,9 +102,9 @@ export default function RegisterPage() {
             onChange={(e) => setPassword(e.target.value)}
             required
             autoComplete="new-password"
-            minLength={8}
+            minLength={6}
             className="w-full px-4 py-3 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 text-zinc-900 dark:text-white outline-none focus:ring-2 focus:ring-indigo-500/40"
-            placeholder="At least 8 characters"
+            placeholder="At least 6 characters"
           />
         </div>
 
@@ -148,11 +129,6 @@ export default function RegisterPage() {
 
         {error ? (
           <p className="text-sm text-red-500 dark:text-red-400">{error}</p>
-        ) : null}
-        {success ? (
-          <p className="text-sm text-emerald-600 dark:text-emerald-400">
-            {success}
-          </p>
         ) : null}
 
         <button

@@ -7,7 +7,6 @@ import {
   Receipt, 
   MoreVertical, 
   Trash2, 
-  UserPlus,
   TrendingUp,
   PieChart as PieChartIcon,
   Calendar,
@@ -17,10 +16,13 @@ import {
   Sparkles,
   Loader2,
   Pencil,
-  X
+  X,
+  Wallet,
+  Shield,
 } from 'lucide-react';
 import Markdown from 'react-markdown';
-import { GoogleGenAI } from "@google/genai";
+import { fetchSpendingInsights } from '../lib/ai-insights';
+import { ApiError } from '../lib/api';
 import { 
   LineChart, 
   Line, 
@@ -35,17 +37,23 @@ import {
   Legend
 } from 'recharts';
 import { AppUser } from '../types';
-import { Group, Expense, GroupMember, CATEGORIES, BudgetType } from '../types';
-import { formatCurrency } from '../utils/format';
+import { Group, Expense, GroupMember, Income, Participant, BudgetType } from '../types';
+import { useCategories } from '../contexts/CategoriesContext';
+import { formatCurrency, formatDate, formatMonthYearFromParts, formatMonthShort, CURRENCY_SYMBOL, MONTH_OPTIONS, yearOptions } from '../utils/format';
 import { handleDbError, OperationType } from '../utils/errorHandling';
-import { useApexStream } from '../contexts/ApexStreamContext';
+import { useAuth } from '../contexts/AuthContext';
 import {
   createExpense,
+  createIncome,
   deleteExpense as deleteExpenseDoc,
   deleteGroup,
+  deleteIncome,
+  listGroupParticipants,
   subscribeToGroup,
   subscribeToGroupExpenses,
+  subscribeToGroupIncomes,
   subscribeToGroupMembers,
+  subscribeToGroupParticipants,
   updateExpense,
   updateGroup,
 } from '../lib/budgetDb';
@@ -59,27 +67,32 @@ interface GroupViewProps {
 }
 
 export default function GroupView({ groupId, user, onBack, theme }: GroupViewProps) {
-  const { db, accessToken } = useApexStream();
+  const { accessToken } = useAuth();
+  const { categories, categoryNames } = useCategories();
   const [group, setGroup] = useState<Group | null>(null);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [members, setMembers] = useState<GroupMember[]>([]);
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [incomes, setIncomes] = useState<Income[]>([]);
   const [isAddExpenseOpen, setIsAddExpenseOpen] = useState(false);
+  const [isAddIncomeOpen, setIsAddIncomeOpen] = useState(false);
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
-  const [isAddMemberOpen, setIsAddMemberOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   // Form states
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
-  const [category, setCategory] = useState(CATEGORIES[0]);
+  const [category, setCategory] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
-  const [newMemberEmail, setNewMemberEmail] = useState('');
+  const [incomeAmount, setIncomeAmount] = useState('');
+  const [incomeSource, setIncomeSource] = useState('');
+  const [incomeParticipantId, setIncomeParticipantId] = useState('');
+  const [incomeDate, setIncomeDate] = useState(new Date().toISOString().split('T')[0]);
   
   // Settings states
-  const [editName, setEditName] = useState('');
-  const [editDescription, setEditDescription] = useState('');
+  const [editMonth, setEditMonth] = useState(1);
+  const [editYear, setEditYear] = useState(new Date().getFullYear());
   const [editMaxBudget, setEditMaxBudget] = useState('');
-  const [editBudgetType, setEditBudgetType] = useState<BudgetType>('monthly');
 
   // AI Analysis states
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -133,24 +146,15 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
     }
   }, [expenseToDelete]);
 
-  // Invite states
-  const [inviteLoading, setInviteLoading] = useState(false);
-  const [inviteError, setInviteError] = useState<string | null>(null);
-  const [inviteSuccess, setInviteSuccess] = useState(false);
-
   useEffect(() => {
-    if (!db) return;
-
     const unsubscribeGroup = subscribeToGroup(
-      db,
       groupId,
       (nextGroup) => {
         if (nextGroup) {
           setGroup(nextGroup);
-          setEditName(nextGroup.name);
-          setEditDescription(nextGroup.description || '');
+          setEditMonth(nextGroup.month);
+          setEditYear(nextGroup.year);
           setEditMaxBudget(nextGroup.maxBudget?.toString() || '');
-          setEditBudgetType(nextGroup.budgetType || 'monthly');
         } else {
           setGroup(null);
         }
@@ -159,25 +163,37 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
     );
 
     const unsubscribeExpenses = subscribeToGroupExpenses(
-      db,
       groupId,
       setExpenses,
       (error) => console.error('Error fetching expenses:', error),
     );
 
     const unsubscribeMembers = subscribeToGroupMembers(
-      db,
       groupId,
       setMembers,
       (error) => console.error('Error fetching members:', error),
+    );
+
+    const unsubscribeParticipants = subscribeToGroupParticipants(
+      groupId,
+      setParticipants,
+      (error) => console.error('Error fetching participants:', error),
+    );
+
+    const unsubscribeIncomes = subscribeToGroupIncomes(
+      groupId,
+      setIncomes,
+      (error) => console.error('Error fetching incomes:', error),
     );
 
     return () => {
       unsubscribeGroup();
       unsubscribeExpenses();
       unsubscribeMembers();
+      unsubscribeParticipants();
+      unsubscribeIncomes();
     };
-  }, [groupId, db]);
+  }, [groupId]);
 
   useEffect(() => {
     if (editingExpense) {
@@ -189,16 +205,22 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
     } else {
       setAmount('');
       setDescription('');
-      setCategory(CATEGORIES[0]);
+      setCategory(categoryNames[0] ?? '');
       setDate(new Date().toISOString().split('T')[0]);
     }
-  }, [editingExpense]);
+  }, [editingExpense, categoryNames]);
+
+  useEffect(() => {
+    if (categoryNames.length && !category && !editingExpense) {
+      setCategory(categoryNames[0]);
+    }
+  }, [categoryNames, category, editingExpense]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsAddExpenseOpen(false);
-        setIsAddMemberOpen(false);
+        setIsAddIncomeOpen(false);
         setIsSettingsOpen(false);
         closeAnalysisModal();
         setIsDeleteGroupConfirmOpen(false);
@@ -217,14 +239,14 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
 
     try {
       if (editingExpense) {
-        await updateExpense(accessToken, editingExpense.id, {
+        await updateExpense(editingExpense.id, {
           amount: parseFloat(amount),
           description: description.trim(),
           category,
           date: dateToIso(new Date(date)),
         });
       } else {
-        await createExpense(accessToken, groupId, user, {
+        await createExpense(groupId, user, {
           amount: parseFloat(amount),
           description: description.trim(),
           category,
@@ -246,15 +268,42 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
     }
   };
 
-  const handleAddMember = async (e: React.FormEvent) => {
+  const handleAddIncome = async (e: React.FormEvent) => {
     e.preventDefault();
-    setInviteError('This feature has been disabled for this demo. Click the Remix button to create your own version of the app and enable sharing.');
+    if (!incomeAmount || !incomeSource.trim() || !incomeParticipantId || !accessToken) return;
+
+    try {
+      const income = await createIncome(groupId, {
+        participantId: incomeParticipantId,
+        amount: parseFloat(incomeAmount),
+        source: incomeSource.trim(),
+        date: new Date(incomeDate),
+      });
+      setIncomes((prev) => [income, ...prev]);
+      void listGroupParticipants(groupId).then(setParticipants);
+      setIsAddIncomeOpen(false);
+      setIncomeAmount('');
+      setIncomeSource('');
+      setIncomeParticipantId('');
+      setIncomeDate(new Date().toISOString().split('T')[0]);
+    } catch (error) {
+      handleDbError(error, OperationType.CREATE, `incomes`, user.uid);
+    }
+  };
+
+  const handleDeleteIncome = async (id: string) => {
+    if (!accessToken) return;
+    try {
+      await deleteIncome(id);
+    } catch (error) {
+      handleDbError(error, OperationType.DELETE, `incomes/${id}`, user.uid);
+    }
   };
 
   const handleDeleteExpense = async (id: string) => {
     if (!accessToken) return;
     try {
-      await deleteExpenseDoc(accessToken, id);
+      await deleteExpenseDoc(id);
       setExpenseToDelete(null);
     } catch (error) {
       handleDbError(error, OperationType.DELETE, `expenses/${id}`, user.uid);
@@ -262,9 +311,9 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
   };
 
   const handleDeleteGroup = async () => {
-    if (!db || !accessToken) return;
+    if (!accessToken) return;
     try {
-      await deleteGroup(db, accessToken, groupId);
+      await deleteGroup(groupId);
       onBack();
     } catch (error) {
       handleDbError(error, OperationType.DELETE, `groups/${groupId}`, user.uid);
@@ -273,14 +322,14 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
 
   const handleUpdateSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editName.trim() || !accessToken) return;
+    if (!accessToken) return;
 
     try {
-      await updateGroup(accessToken, groupId, {
-        name: editName.trim(),
-        description: editDescription.trim(),
+      await updateGroup(groupId, {
+        month: editMonth,
+        year: editYear,
         maxBudget: editMaxBudget ? parseFloat(editMaxBudget) : undefined,
-        budgetType: editMaxBudget ? editBudgetType : 'total',
+        budgetType: editMaxBudget ? 'monthly' : 'total',
       });
       setIsSettingsOpen(false);
     } catch (error) {
@@ -288,83 +337,121 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
     }
   };
 
-  const isDateInCurrentPeriod = (date: Date, type: BudgetType) => {
-    const now = new Date();
-    if (type === 'total') return true;
-    
-    if (type === 'monthly') {
-      return date.getMonth() === now.getMonth() && date.getFullYear() === now.getFullYear();
+  const openAddIncomeModal = () => {
+    if (participants.length > 0 && !incomeParticipantId) {
+      setIncomeParticipantId(participants[0].id);
     }
-    
-    if (type === 'weekly') {
-      // Get start of current week (Sunday)
-      const startOfWeek = new Date(now);
-      startOfWeek.setDate(now.getDate() - now.getDay());
-      startOfWeek.setHours(0, 0, 0, 0);
-      
-      const endOfWeek = new Date(startOfWeek);
-      endOfWeek.setDate(startOfWeek.getDate() + 7);
-      
-      return date >= startOfWeek && date < endOfWeek;
+    if (group) {
+      const now = new Date();
+      const inGroupMonth =
+        now.getMonth() + 1 === group.month && now.getFullYear() === group.year;
+      const day = inGroupMonth ? now.getDate() : 1;
+      const month = String(group.month).padStart(2, '0');
+      const dayStr = String(day).padStart(2, '0');
+      setIncomeDate(`${group.year}-${month}-${dayStr}`);
     }
-    
-    return true;
+    setIsAddIncomeOpen(true);
+  };
+
+  const incomeDateBounds = group
+    ? {
+        min: `${group.year}-${String(group.month).padStart(2, '0')}-01`,
+        max: `${group.year}-${String(group.month).padStart(2, '0')}-${String(new Date(group.year, group.month, 0).getDate()).padStart(2, '0')}`,
+      }
+    : null;
+
+  const isInGroupMonth = (d: Date) => {
+    if (!group) return true;
+    return d.getMonth() + 1 === group.month && d.getFullYear() === group.year;
   };
 
   const currentPeriodExpenses = expenses.filter((e) =>
-    isDateInCurrentPeriod(toDate(e.date), group?.budgetType || 'total'),
+    isInGroupMonth(toDate(e.date)),
   );
+  const monthIncomes = incomes.filter((i) => isInGroupMonth(toDate(i.date)));
+  const totalIncome = monthIncomes.reduce((sum, i) => sum + i.amount, 0);
 
-  const totalSpent = currentPeriodExpenses.reduce((sum, e) => sum + e.amount, 0);
-  const userSpent = currentPeriodExpenses.filter(e => e.paidBy === user.uid).reduce((sum, e) => sum + e.amount, 0);
-  const perPerson = members.length > 0 ? totalSpent / members.length : 0;
+  const scheduledSpend =
+    (group?.installments?.reduce((sum, i) => sum + i.amount, 0) ?? 0) +
+    (group?.creditPayments?.reduce((sum, c) => sum + c.amount, 0) ?? 0) +
+    (group?.insurancePayments?.reduce((sum, ip) => sum + ip.amount, 0) ?? 0) +
+    (group?.shoppingTrips?.reduce((sum, t) => sum + t.totalAmount, 0) ?? 0);
+
+  const expenseSpend = currentPeriodExpenses.reduce(
+    (sum, e) => sum + e.amount,
+    0,
+  );
+  const totalSpent = expenseSpend + scheduledSpend;
+  const userSpent = currentPeriodExpenses
+    .filter((e) => e.paidBy === user.uid)
+    .reduce((sum, e) => sum + e.amount, 0);
+  const perPerson = participants.length > 0 ? totalSpent / participants.length : 0;
   const balance = userSpent - perPerson;
 
-  // Budget calculation
+  // Budget calculation (expenses + scheduled product/loan/insurance payments)
   const currentBudgetSpent = totalSpent;
 
   // Chart Data Preparation
   const getLineChartData = () => {
     if (!group || group.budgetType === 'total') return [];
-    
-    const now = new Date();
-    const currentYear = now.getFullYear();
+
+    const chartYear = group.year;
     const data = [];
-    
+
     if (group.budgetType === 'weekly') {
-      // Show 52 weeks of the year
-      const firstDayOfYear = new Date(currentYear, 0, 1);
+      const firstDayOfYear = new Date(chartYear, 0, 1);
       const startOfFirstWeek = new Date(firstDayOfYear);
       startOfFirstWeek.setDate(firstDayOfYear.getDate() - firstDayOfYear.getDay());
       startOfFirstWeek.setHours(0, 0, 0, 0);
 
+      let scheduledAllocated = false;
+
       for (let i = 0; i < 52; i++) {
         const weekStart = new Date(startOfFirstWeek);
-        weekStart.setDate(startOfFirstWeek.getDate() + (i * 7));
+        weekStart.setDate(startOfFirstWeek.getDate() + i * 7);
         const weekEnd = new Date(weekStart);
         weekEnd.setDate(weekStart.getDate() + 7);
 
-        const weekSpent = expenses
+        let weekSpent = expenses
           .filter((e) => {
             const ed = toDate(e.date);
-            return ed >= weekStart && ed < weekEnd && ed.getFullYear() === currentYear;
+            return (
+              ed >= weekStart &&
+              ed < weekEnd &&
+              ed.getFullYear() === chartYear
+            );
           })
           .reduce((sum, e) => sum + e.amount, 0);
-        
-        data.push({ 
-          name: `W${i + 1}`, 
-          amount: weekSpent 
+
+        if (
+          !scheduledAllocated &&
+          weekStart.getMonth() + 1 === group.month &&
+          weekStart.getFullYear() === chartYear
+        ) {
+          weekSpent += scheduledSpend;
+          scheduledAllocated = true;
+        }
+
+        data.push({
+          name: `W${i + 1}`,
+          amount: Math.round(weekSpent * 100) / 100,
         });
       }
     } else if (group.budgetType === 'monthly') {
-      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const monthNames = [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+      ];
       for (let i = 0; i < 12; i++) {
-        const monthSpent = expenses
+        let monthSpent = expenses
           .filter((e) => {
             const ed = toDate(e.date);
-            return ed.getMonth() === i && ed.getFullYear() === currentYear;
+            return ed.getMonth() === i && ed.getFullYear() === chartYear;
           })
           .reduce((sum, e) => sum + e.amount, 0);
+        if (i === group.month - 1) {
+          monthSpent += scheduledSpend;
+        }
         data.push({ name: monthNames[i], amount: monthSpent });
       }
     }
@@ -373,10 +460,38 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
 
   const getPieChartData = () => {
     const categoryMap = new Map<string, number>();
-    currentPeriodExpenses.forEach(e => {
+    currentPeriodExpenses.forEach((e) => {
       categoryMap.set(e.category, (categoryMap.get(e.category) || 0) + e.amount);
     });
-    return Array.from(categoryMap.entries()).map(([name, value]) => ({ name, value }));
+
+    const productsTotal =
+      (group?.installments?.reduce((sum, i) => sum + i.amount, 0) ?? 0) +
+      (group?.shoppingTrips?.reduce((sum, t) => sum + t.totalAmount, 0) ?? 0);
+    const loansTotal =
+      group?.creditPayments?.reduce((sum, c) => sum + c.amount, 0) ?? 0;
+    const insuranceTotal =
+      group?.insurancePayments?.reduce((sum, ip) => sum + ip.amount, 0) ?? 0;
+
+    if (productsTotal > 0) {
+      categoryMap.set(
+        'Products',
+        (categoryMap.get('Products') || 0) + productsTotal,
+      );
+    }
+    if (loansTotal > 0) {
+      categoryMap.set('Loans', (categoryMap.get('Loans') || 0) + loansTotal);
+    }
+    if (insuranceTotal > 0) {
+      categoryMap.set(
+        'Insurance',
+        (categoryMap.get('Insurance') || 0) + insuranceTotal,
+      );
+    }
+
+    return Array.from(categoryMap.entries()).map(([name, value]) => ({
+      name,
+      value,
+    }));
   };
 
   const lineData = getLineChartData();
@@ -384,29 +499,8 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
   const COLORS = ['#10b981', '#f59e0b', '#3b82f6', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#71717a'];
 
   const getPeriodLabel = () => {
-    const now = new Date();
-    const type = group?.budgetType || 'total';
-    
-    if (type === 'monthly') {
-      return now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-    }
-    
-    if (type === 'weekly') {
-      const startOfWeek = new Date(now);
-      startOfWeek.setDate(now.getDate() - now.getDay());
-      const endOfWeek = new Date(startOfWeek);
-      endOfWeek.setDate(startOfWeek.getDate() + 6);
-      
-      const startMonth = startOfWeek.toLocaleDateString('en-US', { month: 'short' });
-      const endMonth = endOfWeek.toLocaleDateString('en-US', { month: 'short' });
-      
-      if (startMonth === endMonth) {
-        return `${startMonth} ${startOfWeek.getDate()} - ${endOfWeek.getDate()}, ${now.getFullYear()}`;
-      }
-      return `${startMonth} ${startOfWeek.getDate()} - ${endMonth} ${endOfWeek.getDate()}, ${now.getFullYear()}`;
-    }
-    
-    return 'All Time';
+    if (!group) return '';
+    return formatMonthYearFromParts(group.month, group.year);
   };
 
   const handleAnalyzeSpending = async () => {
@@ -421,48 +515,80 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
     analysisAbortController.current = abortController;
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      
       const expenseSummary = expenses.map(e => ({
         amount: e.amount,
         description: e.description,
         category: e.category,
-        date: toDate(e.date).toLocaleDateString()
+        date: formatDate(toDate(e.date))
       }));
 
-      const prompt = `
-        Analyze the following spending data for a group budget named "${group?.name}".
-        Group Type: ${group?.type}
-        Budget Type: ${group?.budgetType}
-        Max Budget: ${group?.maxBudget || 'No limit'}
-        Total Spent in Current Period: ${totalSpent.toFixed(2)}
-        
-        Expenses:
-        ${JSON.stringify(expenseSummary, null, 2)}
-        
-        Please provide:
-        1. A summary of spending habits.
-        2. Identification of any unusual or high spending categories.
-        3. Practical suggestions for saving or better budget management.
-        4. A brief outlook based on the current budget limit.
-        
-        Keep the tone helpful, professional, and encouraging. Use markdown for formatting.
-      `;
+      const scheduledSummary = [
+        ...(group?.installments?.map((i) => ({
+          type: 'Product installment',
+          name: i.purchaseName,
+          amount: i.amount,
+        })) ?? []),
+        ...(group?.creditPayments?.map((c) => ({
+          type: 'Loan payment',
+          name: c.creditName,
+          amount: c.amount,
+        })) ?? []),
+        ...(group?.insurancePayments?.map((ip) => ({
+          type: 'Insurance premium',
+          name: ip.insuranceName,
+          amount: ip.amount,
+        })) ?? []),
+      ];
 
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ parts: [{ text: prompt }] }]
+      const shoppingTripsSummary =
+        group?.shoppingTrips?.map((t) => ({
+          storeName: t.storeName,
+          tripDate: formatDate(toDate(t.tripDate)),
+          totalAmount: t.totalAmount,
+          itemCount: t.itemCount,
+        })) ?? [];
+
+      const userSharePct =
+        expenseSpend > 0 ? Math.round((userSpent / expenseSpend) * 1000) / 10 : 0;
+
+      const { text } = await fetchSpendingInsights({
+        groupName: group?.name ?? '',
+        groupType: group?.type ?? '',
+        budgetType: group?.budgetType ?? 'monthly',
+        month: group?.month,
+        year: group?.year,
+        periodLabel: getPeriodLabel(),
+        maxBudget: group?.maxBudget ?? null,
+        totalSpent,
+        scheduledSpend,
+        totalIncome,
+        userSpendSharePct: userSharePct,
+        memberCount: participants.length,
+        expenses: expenseSummary,
+        scheduled: scheduledSummary,
+        shoppingTrips: shoppingTripsSummary,
       });
 
       if (abortController.signal.aborted) return;
 
-      setAnalysisResult(response.text || "Could not generate analysis.");
-    } catch (error: any) {
-      if (error.name === 'AbortError' || abortController.signal.aborted) {
+      setAnalysisResult(text || "Could not generate analysis.");
+    } catch (error: unknown) {
+      if (
+        error instanceof Error &&
+        (error.name === 'AbortError' || abortController.signal.aborted)
+      ) {
         return;
       }
       console.error("AI Analysis Error:", error);
-      setAnalysisResult("Sorry, I encountered an error while analyzing your spending. Please try again later.");
+      const msg =
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : 'Analysis failed';
+      setAnalysisResult(
+        `Sorry, analysis failed: ${msg}. Check Ollama is running (ollama serve) and the model is pulled.`,
+      );
     } finally {
       if (!abortController.signal.aborted) {
         setIsAnalyzing(false);
@@ -485,20 +611,12 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
       <div className="flex flex-col md:flex-row md:items-start justify-between gap-8 mb-12">
         <div className="flex-1">
           <div className="flex items-center gap-3 mb-3">
-            <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${
-              group.type === 'household' ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-500/20' :
-              group.type === 'trip' ? 'bg-orange-50 dark:bg-orange-500/10 text-orange-700 dark:text-orange-400 border border-orange-100 dark:border-orange-500/20' :
-              'bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400 border border-blue-100 dark:border-blue-500/20'
-            }`}>
-              {group.type}
-            </span>
-            <div className="flex items-center gap-1.5 text-zinc-400 dark:text-zinc-500">
-              <Calendar className="w-3.5 h-3.5" />
+            <div className="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400">
+              <Calendar className="w-4 h-4" />
               <span className="text-[10px] font-bold uppercase tracking-widest">{getPeriodLabel()}</span>
             </div>
           </div>
           <h1 className="text-4xl font-bold tracking-tight text-zinc-900 dark:text-white mb-3 font-display">{group.name}</h1>
-          <p className="text-zinc-600 dark:text-zinc-300 max-w-2xl leading-relaxed font-medium">{group.description || 'No description provided.'}</p>
         </div>
 
         <div className="flex flex-wrap items-stretch gap-2 sm:gap-3 w-full md:w-auto">
@@ -506,17 +624,17 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
             <button 
               onClick={() => setIsSettingsOpen(true)}
               className="w-12 sm:w-auto p-3 border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 rounded-2xl text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-white transition-all shadow-sm flex items-center justify-center shrink-0"
-              title="Group Settings"
+              title="Month Settings"
             >
               <MoreVertical className="w-5 h-5" />
             </button>
           )}
           <button 
-            onClick={() => setIsAddMemberOpen(true)}
-            className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 sm:px-5 py-3 border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 rounded-2xl text-sm font-bold text-zinc-700 dark:text-zinc-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 hover:border-indigo-200 dark:hover:border-indigo-800 hover:shadow-lg hover:shadow-indigo-500/10 transition-all active:scale-95"
+            onClick={openAddIncomeModal}
+            className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 sm:px-5 py-3 border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 rounded-2xl text-sm font-bold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 transition-all active:scale-95"
           >
-            <UserPlus className="w-4 h-4" />
-            Invite
+            <Wallet className="w-4 h-4" />
+            Add Income
           </button>
           <button 
             onClick={handleAnalyzeSpending}
@@ -539,7 +657,22 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 md:gap-4 lg:gap-6 mb-12">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 md:gap-4 lg:gap-6 mb-12">
+        <button 
+          onClick={() => setSelectedStatDetails({ title: 'Total Income', amount: totalIncome })}
+          className="text-left w-full bg-white dark:bg-zinc-900 p-6 md:p-5 lg:p-8 rounded-[32px] border border-zinc-200 dark:border-zinc-800 shadow-xl shadow-zinc-200/50 dark:shadow-zinc-950/20 relative overflow-hidden group hover:scale-[1.02] active:scale-95 transition-all cursor-pointer"
+        >
+          <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/10 rounded-full -mr-16 -mt-16 transition-transform group-hover:scale-110" />
+          <div className="relative">
+            <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-[0.2em] mb-4 font-display">Total Income</p>
+            <p className="text-4xl md:text-2xl lg:text-3xl xl:text-4xl font-bold text-emerald-600 dark:text-emerald-400 font-display tracking-tight truncate" title={formatCurrency(totalIncome)}>
+              {formatCurrency(totalIncome)}
+            </p>
+            <p className="text-xs font-medium text-zinc-500 mt-4">
+              Balance: {formatCurrency(totalIncome - totalSpent)}
+            </p>
+          </div>
+        </button>
         <button 
           onClick={() => setSelectedStatDetails({ title: 'Total Group Spend', amount: totalSpent })}
           className="text-left w-full bg-white dark:bg-zinc-900 p-6 md:p-5 lg:p-8 rounded-[32px] border border-zinc-200 dark:border-zinc-800 shadow-xl shadow-zinc-200/50 dark:shadow-zinc-950/20 relative overflow-hidden group hover:scale-[1.02] active:scale-95 transition-all cursor-pointer"
@@ -549,9 +682,9 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
             <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-[0.2em] mb-4 font-display">Total Group Spend</p>
             <p 
               className="text-4xl md:text-2xl lg:text-3xl xl:text-4xl font-bold text-zinc-900 dark:text-white font-display tracking-tight truncate"
-              title={`$${formatCurrency(totalSpent)}`}
+              title={formatCurrency(totalSpent)}
             >
-              ${formatCurrency(totalSpent)}
+              {formatCurrency(totalSpent)}
             </p>
             {group.maxBudget && (
               <div className="mt-6">
@@ -568,7 +701,7 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                   />
                 </div>
                 <p className="text-[10px] text-zinc-500 mt-2 font-medium">
-                  ${formatCurrency(currentBudgetSpent)} of ${formatCurrency(group.maxBudget)}
+                  {formatCurrency(currentBudgetSpent)} of {formatCurrency(group.maxBudget)}
                 </p>
               </div>
             )}
@@ -583,9 +716,9 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
             <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-[0.2em] mb-4 font-display">Your Share</p>
             <p 
               className="text-4xl md:text-2xl lg:text-3xl xl:text-4xl font-bold text-zinc-900 dark:text-white font-display tracking-tight truncate"
-              title={`$${formatCurrency(perPerson)}`}
+              title={formatCurrency(perPerson)}
             >
-              ${formatCurrency(perPerson)}
+              {formatCurrency(perPerson)}
             </p>
             <p className="text-xs font-medium text-zinc-500 mt-4">
               {totalSpent > 0 ? ((userSpent / totalSpent) * 100).toFixed(0) : 0}% of total paid by you
@@ -603,9 +736,9 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
             </p>
             <p 
               className={`text-4xl md:text-2xl lg:text-3xl xl:text-4xl font-bold font-display tracking-tight truncate ${balance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}
-              title={`$${formatCurrency(Math.abs(balance))}`}
+              title={formatCurrency(Math.abs(balance))}
             >
-              ${formatCurrency(Math.abs(balance))}
+              {formatCurrency(Math.abs(balance))}
             </p>
           </div>
         </button>
@@ -634,7 +767,7 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                     axisLine={false} 
                     tickLine={false} 
                     tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
-                    tickFormatter={(value) => `$${value}`}
+                    tickFormatter={(value) => formatCurrency(value)}
                   />
                   <Tooltip 
                     contentStyle={{ 
@@ -647,7 +780,7 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                     }}
                     itemStyle={{ fontSize: '12px', fontWeight: 600, color: theme === 'dark' ? '#ffffff' : '#18181b' }}
                     labelStyle={{ fontSize: '10px', color: '#71717a', marginBottom: '4px', textTransform: 'uppercase', fontWeight: 700 }}
-                    formatter={(value: number) => [`$${formatCurrency(value)}`, 'Spent']}
+                    formatter={(value: number) => [formatCurrency(value), 'Spent']}
                   />
                   <Line 
                     type="monotone" 
@@ -685,7 +818,7 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                     ))}
                   </Pie>
                   <Tooltip 
-                    formatter={(value: number) => [`$${formatCurrency(value)}`, 'Total']}
+                    formatter={(value: number) => [formatCurrency(value), 'Total']}
                     contentStyle={{ 
                       borderRadius: '16px', 
                       border: 'none', 
@@ -709,9 +842,10 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
         </div>
       </div>
 
+      <div className="space-y-12">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
         <div className="lg:col-span-2">
-          <div className="flex items-center justify-between mb-8">
+          <div className="flex items-center justify-between mb-6">
             <h2 className="text-xl font-bold tracking-tight text-zinc-900 dark:text-white flex items-center gap-3 font-display">
               <Receipt className="w-6 h-6 text-zinc-400 dark:text-zinc-500" />
               Transaction History
@@ -734,7 +868,7 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                   <div key={expense.id} className="p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between group transition-all duration-200 gap-4 hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
                     <div className="flex items-center gap-4 sm:gap-5 min-w-0">
                       <div className="w-12 h-12 sm:w-14 sm:h-14 bg-zinc-50 dark:bg-zinc-800 rounded-2xl flex flex-col items-center justify-center text-zinc-400 dark:text-zinc-500 border border-zinc-100 dark:border-zinc-700 group-hover:bg-white dark:group-hover:bg-zinc-800 transition-colors shrink-0">
-                        <span className="text-[9px] sm:text-[10px] font-bold uppercase tracking-tighter text-zinc-500">{toDate(expense.date).toLocaleDateString('en-US', { month: 'short' })}</span>
+                        <span className="text-[9px] sm:text-[10px] font-bold uppercase tracking-tighter text-zinc-500">{formatMonthShort(toDate(expense.date))}</span>
                         <span className="text-lg sm:text-xl font-bold leading-none text-zinc-900 dark:text-white">{toDate(expense.date).getDate()}</span>
                       </div>
                       <div className="min-w-0">
@@ -750,9 +884,9 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                       <div className="text-left sm:text-right min-w-0">
                         <p 
                           className="text-lg sm:text-xl font-bold text-zinc-900 dark:text-white font-mono tracking-tight truncate"
-                          title={`$${formatCurrency(expense.amount)}`}
+                          title={formatCurrency(expense.amount)}
                         >
-                          ${formatCurrency(expense.amount)}
+                          {formatCurrency(expense.amount)}
                         </p>
                         <p className="text-[9px] sm:text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Amount</p>
                       </div>
@@ -781,38 +915,283 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
         </div>
 
         <div>
-          <h2 className="text-xl font-bold tracking-tight text-zinc-900 dark:text-white mb-8 flex items-center gap-3 font-display">
+          <h2 className="text-xl font-bold tracking-tight text-zinc-900 dark:text-white mb-6 flex items-center gap-3 font-display">
             <Users className="w-6 h-6 text-zinc-400 dark:text-zinc-500" />
-            Group Members
+            People
           </h2>
-          <div className="bg-white dark:bg-zinc-900 p-8 rounded-[40px] border border-zinc-200 dark:border-zinc-800 shadow-xl shadow-zinc-200/50 dark:shadow-black/20">
-            <div className="space-y-6">
-              {members.map(member => (
-                <div key={member.uid} className="flex items-center justify-between group">
-                  <div className="flex items-center gap-4 min-w-0">
-                    <div className="relative shrink-0">
-                      <div className="w-12 h-12 bg-zinc-50 dark:bg-zinc-800 rounded-2xl flex items-center justify-center text-zinc-400 dark:text-zinc-500 font-bold border border-zinc-100 dark:border-zinc-700 group-hover:border-indigo-500 transition-colors">
-                        {member.displayName?.charAt(0)}
-                      </div>
-                      {member.uid === group.createdBy && (
-                        <div className="absolute -top-1 -right-1 w-4 h-4 bg-indigo-600 rounded-full border-2 border-white dark:border-zinc-900 flex items-center justify-center">
-                          <Sparkles className="w-2 h-2 text-white" />
+          <div className="bg-white dark:bg-zinc-900 rounded-[40px] border border-zinc-200 dark:border-zinc-800 shadow-xl shadow-zinc-200/50 dark:shadow-black/20 overflow-hidden">
+            {participants.length === 0 ? (
+              <div className="p-10 sm:p-20 text-center">
+                <Users className="w-12 h-12 text-zinc-300 dark:text-zinc-600 mx-auto mb-4" />
+                <p className="text-zinc-500 font-medium text-sm">
+                  Invite people from Dashboard → Household
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                {participants.map(participant => (
+                  <div key={participant.id} className="p-4 sm:p-6 flex items-center justify-between group">
+                    <div className="flex items-center gap-4 min-w-0">
+                      <div className="relative shrink-0">
+                        <div className="w-12 h-12 bg-zinc-50 dark:bg-zinc-800 rounded-2xl flex items-center justify-center text-zinc-400 dark:text-zinc-500 font-bold border border-zinc-100 dark:border-zinc-700 group-hover:border-indigo-500 transition-colors">
+                          {participant.name?.charAt(0)}
                         </div>
-                      )}
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-bold text-zinc-900 dark:text-white truncate">{member.displayName}</p>
-                      <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest truncate">{member.role}</p>
+                        {participant.userId === group.createdBy && (
+                          <div className="absolute -top-1 -right-1 w-4 h-4 bg-indigo-600 rounded-full border-2 border-white dark:border-zinc-900 flex items-center justify-center">
+                            <Sparkles className="w-2 h-2 text-white" />
+                          </div>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-zinc-900 dark:text-white truncate">{participant.name}</p>
+                        <p className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-widest truncate">
+                          Income: {formatCurrency(participant.totalIncome)}
+                        </p>
+                      </div>
                     </div>
                   </div>
-                  {member.uid === group.createdBy && (
-                    <span className="shrink-0 text-[9px] font-bold text-indigo-600 bg-indigo-50 dark:bg-indigo-500/10 px-2 py-0.5 rounded-full border border-indigo-100 dark:border-indigo-500/20 ml-2">OWNER</span>
-                  )}
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {group.installments && group.installments.length > 0 && (
+        <section>
+          <h2 className="text-xl font-bold tracking-tight text-zinc-900 dark:text-white mb-6 flex items-center gap-3 font-display">
+            <CreditCard className="w-6 h-6 text-indigo-500" />
+            Scheduled Product Payments
+          </h2>
+          <div className="bg-white dark:bg-zinc-900 rounded-[40px] border border-zinc-200 dark:border-zinc-800 shadow-xl shadow-zinc-200/50 dark:shadow-black/20 overflow-hidden">
+            <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              {group.installments.map((inst) => (
+                <div
+                  key={inst.id}
+                  className="p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                >
+                  <div className="min-w-0">
+                    <p className="font-bold text-zinc-900 dark:text-white">
+                      {inst.purchaseName}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      {inst.store && (
+                        <span className="text-[10px] font-bold text-zinc-500 uppercase">
+                          {inst.store}
+                        </span>
+                      )}
+                      <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold uppercase">
+                        Payment {inst.installmentNumber}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-lg font-bold font-mono text-indigo-600 dark:text-indigo-400">
+                    {formatCurrency(inst.amount)}
+                  </p>
                 </div>
               ))}
             </div>
+            <div className="px-6 py-4 bg-indigo-50 dark:bg-indigo-900/20 border-t border-indigo-100 dark:border-indigo-800/50 flex justify-between items-center">
+              <span className="text-xs font-bold uppercase tracking-widest text-indigo-600 dark:text-indigo-400">
+                Total scheduled
+              </span>
+              <span className="font-bold text-indigo-700 dark:text-indigo-300">
+                {formatCurrency(
+                  group.installments.reduce((sum, i) => sum + i.amount, 0),
+                )}
+              </span>
+            </div>
           </div>
+        </section>
+      )}
+
+      {group.shoppingTrips && group.shoppingTrips.length > 0 && (
+        <section>
+          <h2 className="text-xl font-bold tracking-tight text-zinc-900 dark:text-white mb-6 flex items-center gap-3 font-display">
+            <Receipt className="w-6 h-6 text-emerald-500" />
+            Store purchases
+          </h2>
+          <div className="bg-white dark:bg-zinc-900 rounded-[40px] border border-zinc-200 dark:border-zinc-800 shadow-xl shadow-zinc-200/50 dark:shadow-black/20 overflow-hidden">
+            <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              {group.shoppingTrips.map((trip) => (
+                <div
+                  key={trip.id}
+                  className="p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                >
+                  <div className="min-w-0">
+                    <p className="font-bold text-zinc-900 dark:text-white">
+                      {trip.storeName ?? 'Supermarket'}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      <span className="text-[10px] font-bold text-zinc-500 uppercase">
+                        {formatDate(toDate(trip.tripDate))}
+                      </span>
+                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold uppercase">
+                        {trip.itemCount} items
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-lg font-bold font-mono text-emerald-600 dark:text-emerald-400">
+                    {formatCurrency(trip.totalAmount)}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="px-6 py-4 bg-emerald-50 dark:bg-emerald-900/20 border-t border-emerald-100 dark:border-emerald-800/50 flex justify-between items-center">
+              <span className="text-xs font-bold uppercase tracking-widest text-emerald-600 dark:text-emerald-400">
+                Total groceries
+              </span>
+              <span className="font-bold text-emerald-700 dark:text-emerald-300">
+                {formatCurrency(
+                  group.shoppingTrips.reduce((sum, t) => sum + t.totalAmount, 0),
+                )}
+              </span>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {group.creditPayments && group.creditPayments.length > 0 && (
+        <section>
+          <h2 className="text-xl font-bold tracking-tight text-zinc-900 dark:text-white mb-6 flex items-center gap-3 font-display">
+            <CreditCard className="w-6 h-6 text-emerald-500" />
+            Scheduled Loan Payments
+          </h2>
+          <div className="bg-white dark:bg-zinc-900 rounded-[40px] border border-zinc-200 dark:border-zinc-800 shadow-xl shadow-zinc-200/50 dark:shadow-black/20 overflow-hidden">
+            <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              {group.creditPayments.map((cp) => (
+                <div
+                  key={cp.id}
+                  className="p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                >
+                  <div className="min-w-0">
+                    <p className="font-bold text-zinc-900 dark:text-white">
+                      {cp.creditName}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      {cp.lender && (
+                        <span className="text-[10px] font-bold text-zinc-500 uppercase">
+                          {cp.lender}
+                        </span>
+                      )}
+                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold uppercase">
+                        Payment {cp.paymentNumber} · day {cp.paymentDay}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-lg font-bold font-mono text-emerald-600 dark:text-emerald-400">
+                    {formatCurrency(cp.amount)}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="px-6 py-4 bg-emerald-50 dark:bg-emerald-900/20 border-t border-emerald-100 dark:border-emerald-800/50 flex justify-between items-center">
+              <span className="text-xs font-bold uppercase tracking-widest text-emerald-600 dark:text-emerald-400">
+                Total scheduled
+              </span>
+              <span className="font-bold text-emerald-700 dark:text-emerald-300">
+                {formatCurrency(
+                  group.creditPayments.reduce((sum, i) => sum + i.amount, 0),
+                )}
+              </span>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {group.insurancePayments && group.insurancePayments.length > 0 && (
+        <section>
+          <h2 className="text-xl font-bold tracking-tight text-zinc-900 dark:text-white mb-6 flex items-center gap-3 font-display">
+            <Shield className="w-6 h-6 text-sky-500" />
+            Scheduled Insurance Premiums
+          </h2>
+          <div className="bg-white dark:bg-zinc-900 rounded-[40px] border border-zinc-200 dark:border-zinc-800 shadow-xl shadow-zinc-200/50 dark:shadow-black/20 overflow-hidden">
+            <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              {group.insurancePayments.map((ip) => (
+                <div
+                  key={ip.id}
+                  className="p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                >
+                  <div className="min-w-0">
+                    <p className="font-bold text-zinc-900 dark:text-white">
+                      {ip.insuranceName}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      <span className="text-[10px] font-bold text-zinc-500 uppercase">
+                        {ip.company}
+                      </span>
+                      {ip.subjectLabel && (
+                        <span className="text-[10px] text-sky-600 dark:text-sky-400 font-bold uppercase">
+                          {ip.subjectLabel}
+                        </span>
+                      )}
+                      <span className="text-[10px] text-zinc-400 font-bold uppercase">
+                        Payment {ip.paymentNumber} · day {ip.paymentDay}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-lg font-bold font-mono text-sky-600 dark:text-sky-400">
+                    {formatCurrency(ip.amount)}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="px-6 py-4 bg-sky-50 dark:bg-sky-900/20 border-t border-sky-100 dark:border-sky-800/50 flex justify-between items-center">
+              <span className="text-xs font-bold uppercase tracking-widest text-sky-600 dark:text-sky-400">
+                Total scheduled
+              </span>
+              <span className="font-bold text-sky-700 dark:text-sky-300">
+                {formatCurrency(
+                  group.insurancePayments.reduce((sum, i) => sum + i.amount, 0),
+                )}
+              </span>
+            </div>
+          </div>
+        </section>
+      )}
+
+      <section>
+        <h2 className="text-xl font-bold tracking-tight text-zinc-900 dark:text-white mb-6 flex items-center gap-3 font-display">
+          <Wallet className="w-6 h-6 text-emerald-500" />
+          Income
+        </h2>
+        <div className="bg-white dark:bg-zinc-900 rounded-[40px] border border-zinc-200 dark:border-zinc-800 shadow-xl shadow-zinc-200/50 dark:shadow-black/20 overflow-hidden">
+          {monthIncomes.length === 0 ? (
+            <div className="p-10 sm:p-20 text-center">
+              <div className="w-16 h-16 sm:w-20 sm:h-20 bg-zinc-50 dark:bg-zinc-800 rounded-full flex items-center justify-center mx-auto mb-6">
+                <Wallet className="w-8 h-8 sm:w-10 sm:h-10 text-zinc-300 dark:text-zinc-600" />
+              </div>
+              <h3 className="text-lg font-bold text-zinc-900 dark:text-white mb-2">No income recorded</h3>
+              <p className="text-zinc-500 dark:text-zinc-400 max-w-xs mx-auto text-sm">Add income using the button above.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              {monthIncomes.map(income => (
+                <div key={income.id} className="p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 group">
+                  <div className="min-w-0">
+                    <p className="font-bold text-zinc-900 dark:text-white">{income.source}</p>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase">{income.participantName}</span>
+                      <span className="text-[10px] text-zinc-500">{formatDate(toDate(income.date))}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <p className="text-lg font-bold font-mono text-emerald-600 dark:text-emerald-400">{formatCurrency(income.amount)}</p>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteIncome(income.id)}
+                      className="p-2 text-zinc-400 hover:text-red-600 rounded-xl sm:opacity-0 group-hover:opacity-100 transition-all"
+                      title="Delete income"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
+      </section>
       </div>
 
       {/* Add Expense Modal */}
@@ -858,7 +1237,7 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                 <div>
                   <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Amount</label>
                   <div className="relative">
-                    <span className="absolute left-5 top-1/2 -translate-y-1/2 text-zinc-400 font-mono font-bold">$</span>
+                    <span className="absolute left-5 top-1/2 -translate-y-1/2 text-zinc-400 font-mono font-bold">{CURRENCY_SYMBOL}</span>
                     <input
                       type="number"
                       step="0.01"
@@ -890,7 +1269,9 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                       onChange={(e) => setCategory(e.target.value)}
                       className="w-full px-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium appearance-none dark:text-white"
                     >
-                      {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                      {categories.map((c) => (
+                        <option key={c.id} value={c.name}>{c.name} ({c.priority})</option>
+                      ))}
                     </select>
                   </div>
                   <div>
@@ -915,84 +1296,94 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
         )}
       </AnimatePresence>
 
-      {/* Add Member Modal */}
+      {/* Add Income Modal */}
       <AnimatePresence>
-        {isAddMemberOpen && (
+        {isAddIncomeOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }} 
-              animate={{ opacity: 1 }} 
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setIsAddMemberOpen(false)}
+              onClick={() => setIsAddIncomeOpen(false)}
               className="absolute inset-0 bg-zinc-900/40 backdrop-blur-sm"
             />
             <motion.div
               role="dialog"
               aria-modal="true"
-              aria-labelledby="add-member-title"
+              aria-labelledby="add-income-title"
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-md bg-white dark:bg-zinc-900 rounded-[40px] shadow-2xl p-10 outline-none"
+              className="relative w-full max-w-md bg-white dark:bg-zinc-900 rounded-[40px] shadow-2xl p-6 sm:p-10 outline-none"
             >
-              <div className="flex items-center justify-between mb-2">
-                <h3 id="add-member-title" className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-white font-display">Invite Member</h3>
-                <button 
-                  type="button"
-                  onClick={() => setIsAddMemberOpen(false)} 
-                  className="p-2 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-full transition-colors outline-none focus:ring-2 focus:ring-indigo-500"
-                  aria-label="Close modal"
-                >
+              <div className="flex items-center justify-between mb-8">
+                <h3 id="add-income-title" className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-white font-display">Add Income</h3>
+                <button type="button" onClick={() => setIsAddIncomeOpen(false)} className="p-2 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-full">
                   <X className="w-5 h-5 text-zinc-500" />
                 </button>
               </div>
-              <p className="text-zinc-500 dark:text-zinc-400 text-sm mb-8">Enter the email address of the person you want to add.</p>
-              
-              {inviteError && (
-                <div className="mb-6 p-4 bg-red-50 dark:bg-red-500/10 border border-red-100 dark:border-red-500/20 text-red-600 dark:text-red-400 text-xs font-bold rounded-2xl">
-                  {inviteError}
-                </div>
+              {participants.length === 0 ? (
+                <p className="text-zinc-500 text-sm mb-6">
+                  No people in this month yet. Invite someone from the Dashboard → Household.
+                </p>
+              ) : (
+                <form onSubmit={handleAddIncome} className="space-y-6">
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Person</label>
+                    <select
+                      value={incomeParticipantId}
+                      onChange={(e) => setIncomeParticipantId(e.target.value)}
+                      className="w-full px-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl font-medium dark:text-white"
+                      required
+                    >
+                      <option value="">Select person</option>
+                      {participants.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Source</label>
+                    <input
+                      type="text"
+                      value={incomeSource}
+                      onChange={(e) => setIncomeSource(e.target.value)}
+                      className="w-full px-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl font-medium dark:text-white"
+                      placeholder="Salary, gift, refund..."
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Amount</label>
+                    <div className="relative">
+                      <span className="absolute left-5 top-1/2 -translate-y-1/2 text-zinc-400 font-mono font-bold">{CURRENCY_SYMBOL}</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={incomeAmount}
+                        onChange={(e) => setIncomeAmount(e.target.value)}
+                        className="w-full pl-10 pr-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl font-mono font-bold dark:text-white"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Date</label>
+                    <input
+                      type="date"
+                      value={incomeDate}
+                      onChange={(e) => setIncomeDate(e.target.value)}
+                      min={incomeDateBounds?.min}
+                      max={incomeDateBounds?.max}
+                      className="w-full px-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl font-medium dark:text-white"
+                      required
+                    />
+                  </div>
+                  <button type="submit" className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all">
+                    Add Income
+                  </button>
+                </form>
               )}
-
-              {inviteSuccess && (
-                <div className="mb-6 p-4 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-100 dark:border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-xs font-bold rounded-2xl flex items-center gap-2">
-                  <Sparkles className="w-4 h-4" />
-                  Member added successfully!
-                </div>
-              )}
-
-              <form onSubmit={handleAddMember} className="space-y-6">
-                <div>
-                  <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Email Address</label>
-                  <input
-                    type="email"
-                    value={newMemberEmail}
-                    onChange={(e) => {
-                      setNewMemberEmail(e.target.value);
-                      setInviteError(null);
-                    }}
-                    className="w-full px-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium dark:text-white"
-                    placeholder="friend@example.com"
-                    required
-                    disabled={inviteLoading || inviteSuccess}
-                    autoFocus
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={inviteLoading || inviteSuccess}
-                  className="w-full py-4 bg-zinc-900 dark:bg-indigo-600 text-white rounded-2xl font-bold hover:bg-zinc-800 dark:hover:bg-indigo-700 transition-all mt-4 flex items-center justify-center gap-2 disabled:opacity-50 shadow-lg shadow-zinc-200 dark:shadow-indigo-500/20 active:scale-95"
-                >
-                  {inviteLoading ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Adding...
-                    </>
-                  ) : (
-                    'Add to Group'
-                  )}
-                </button>
-              </form>
             </motion.div>
           </div>
         )}
@@ -1019,7 +1410,7 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
               className="relative w-full max-w-md bg-white dark:bg-zinc-900 rounded-[40px] shadow-2xl p-10 max-h-[90vh] overflow-y-auto outline-none"
             >
               <div className="flex items-center justify-between mb-8">
-                <h3 id="settings-title" className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-white font-display">Group Settings</h3>
+                <h3 id="settings-title" className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-white font-display">Month Settings</h3>
                 <button 
                   type="button"
                   onClick={() => setIsSettingsOpen(false)} 
@@ -1031,26 +1422,31 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
               </div>
               <form onSubmit={handleUpdateSettings} className="space-y-8">
                 <div>
-                  <h4 className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400 mb-6">General Info</h4>
-                  <div className="space-y-5">
+                  <h4 className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400 mb-6">Month</h4>
+                  <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Group Name</label>
-                      <input
-                        type="text"
-                        value={editName}
-                        onChange={(e) => setEditName(e.target.value)}
-                        className="w-full px-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium dark:text-white"
-                        required
-                        autoFocus
-                      />
+                      <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Month</label>
+                      <select
+                        value={editMonth}
+                        onChange={(e) => setEditMonth(Number(e.target.value))}
+                        className="w-full px-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl font-medium dark:text-white"
+                      >
+                        {MONTH_OPTIONS.map((m) => (
+                          <option key={m.value} value={m.value}>{m.label}</option>
+                        ))}
+                      </select>
                     </div>
                     <div>
-                      <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Description</label>
-                      <textarea
-                        value={editDescription}
-                        onChange={(e) => setEditDescription(e.target.value)}
-                        className="w-full px-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium resize-none h-24 dark:text-white"
-                      />
+                      <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Year</label>
+                      <select
+                        value={editYear}
+                        onChange={(e) => setEditYear(Number(e.target.value))}
+                        className="w-full px-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl font-medium dark:text-white"
+                      >
+                        {yearOptions().map((y) => (
+                          <option key={y} value={y}>{y}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
                 </div>
@@ -1061,7 +1457,7 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                     <div>
                       <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Max Budget</label>
                       <div className="relative">
-                        <span className="absolute left-5 top-1/2 -translate-y-1/2 text-zinc-400 font-mono font-bold">$</span>
+                        <span className="absolute left-5 top-1/2 -translate-y-1/2 text-zinc-400 font-mono font-bold">{CURRENCY_SYMBOL}</span>
                         <input
                           type="number"
                           step="0.01"
@@ -1071,18 +1467,6 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
                           className="w-full pl-10 pr-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-mono font-bold dark:text-white"
                         />
                       </div>
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-[0.15em] mb-2">Frequency</label>
-                      <select
-                        value={editBudgetType}
-                        onChange={(e) => setEditBudgetType(e.target.value as BudgetType)}
-                        className="w-full px-5 py-4 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium appearance-none dark:text-white"
-                      >
-                        <option value="weekly">Per Week</option>
-                        <option value="monthly">Per Month</option>
-                        <option value="total">Total</option>
-                      </select>
                     </div>
                   </div>
                 </div>
@@ -1243,7 +1627,7 @@ export default function GroupView({ groupId, user, onBack, theme }: GroupViewPro
             >
               <p id="stat-title" className="text-xs font-bold text-zinc-500 uppercase tracking-[0.2em] mb-4 font-display">{selectedStatDetails.title}</p>
               <p className="text-5xl sm:text-6xl font-bold text-zinc-900 dark:text-white font-display tracking-tight mb-2 break-all">
-                ${formatCurrency(selectedStatDetails.amount)}
+                {formatCurrency(selectedStatDetails.amount)}
               </p>
               {selectedStatDetails.subtitle && (
                 <p className="text-sm font-medium text-zinc-500 mt-4">

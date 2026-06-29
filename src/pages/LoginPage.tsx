@@ -1,12 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import AuthLayout from '../components/AuthLayout';
-import { useApexStream } from '../contexts/ApexStreamContext';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const { signIn, user, loading, authConfigured } = useApexStream();
+  const location = useLocation();
+  const { signIn, user, loading } = useAuth();
+  const from =
+    (location.state as { from?: { pathname: string } } | null)?.from?.pathname ??
+    '/';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -14,23 +18,9 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!loading && user) {
-      navigate('/', { replace: true });
+      navigate(from, { replace: true });
     }
-  }, [loading, user, navigate]);
-
-  if (!authConfigured) {
-    return (
-      <AuthLayout
-        title="Configuration required"
-        subtitle="Set VITE_APEXSTREAM_APP_ID and VITE_APEXSTREAM_PUBLISHABLE_KEY in your .env file."
-      >
-        <p className="text-sm text-zinc-500">
-          See <code className="font-mono text-xs">.env.example</code> for all
-          required variables.
-        </p>
-      </AuthLayout>
-    );
-  }
+  }, [loading, user, navigate, from]);
 
   if (loading) {
     return (
@@ -46,7 +36,7 @@ export default function LoginPage() {
     setSubmitting(true);
     try {
       await signIn(email, password);
-      navigate('/', { replace: true });
+      navigate(from, { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
     } finally {
@@ -57,7 +47,7 @@ export default function LoginPage() {
   return (
     <AuthLayout
       title="Sign in"
-      subtitle="Sign in with your ApexStream account to access Budgeted."
+      subtitle="Sign in to access Budgeted."
       footer={
         <>
           Don&apos;t have an account?{' '}
