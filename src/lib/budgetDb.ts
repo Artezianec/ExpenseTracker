@@ -1,267 +1,230 @@
-import type { ApexStreamDatabase, AppDocument } from '@apexstream/client';
-import type { AppAuthSession } from '@apexstream/client';
 import type {
   AppUser,
   Expense,
   Group,
   GroupMember,
+  Income,
+  Participant,
   UserProfile,
 } from '../types';
-import { dbDelete, dbPatch, dbSet } from './dbApi';
+import { apiFetch } from './api';
 import { dateToIso, nowIso } from './dates';
-import { sessionToAppUser } from './user';
 
-export const COLLECTIONS = {
-  users: 'users',
-  groups: 'groups',
-  expenses: 'expenses',
-  members: 'members',
-} as const;
+export const POLL_INTERVAL_MS = 15000;
 
-const LIST_LIMIT = 500;
-
-function docData<T>(doc: AppDocument): T {
-  return doc.data as T;
+export async function ensureUserProfile(): Promise<AppUser> {
+  const { user } = await apiFetch<{ user: AppUser; profile: UserProfile }>(
+    '/auth/me',
+  );
+  return user;
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value as Record<string, unknown>;
+export async function listUserGroups(_userId: string): Promise<Group[]> {
+  return apiFetch<Group[]>('/groups');
 }
 
-export function memberDocId(groupId: string, uid: string): string {
-  return `${groupId}__${uid}`;
+export async function listGroupExpenses(groupId: string): Promise<Expense[]> {
+  return apiFetch<Expense[]>(`/groups/${encodeURIComponent(groupId)}/expenses`);
 }
 
-export async function ensureUserProfile(
-  db: ApexStreamDatabase,
-  session: AppAuthSession,
-): Promise<AppUser> {
-  const appUser = sessionToAppUser(session);
-  const accessToken = session.accessToken;
+export async function listGroupMembers(groupId: string): Promise<GroupMember[]> {
+  return apiFetch<GroupMember[]>(
+    `/groups/${encodeURIComponent(groupId)}/members`,
+  );
+}
 
+export async function listGroupParticipants(
+  groupId: string,
+): Promise<Participant[]> {
+  return apiFetch<Participant[]>(
+    `/groups/${encodeURIComponent(groupId)}/participants`,
+  );
+}
+
+export async function listGroupIncomes(groupId: string): Promise<Income[]> {
+  return apiFetch<Income[]>(
+    `/groups/${encodeURIComponent(groupId)}/incomes`,
+  );
+}
+
+export async function getGroup(groupId: string): Promise<Group | null> {
   try {
-    const existing = await db.collection(COLLECTIONS.users).doc(appUser.uid).get();
-    const data = docData<UserProfile>(existing);
-    await dbPatch(accessToken, COLLECTIONS.users, appUser.uid, {
-      displayName: appUser.displayName ?? data.displayName,
-      email: appUser.email ?? data.email,
-      photoURL: appUser.photoURL ?? data.photoURL,
-    });
+    return await apiFetch<Group>(`/groups/${encodeURIComponent(groupId)}`);
   } catch {
-    const profile: UserProfile = {
-      uid: appUser.uid,
-      displayName: appUser.displayName,
-      email: appUser.email,
-      photoURL: appUser.photoURL,
-      createdAt: nowIso(),
-    };
-    await dbSet(accessToken, COLLECTIONS.users, appUser.uid, asRecord(profile));
+    return null;
   }
-
-  return appUser;
 }
 
-export function parseGroup(doc: AppDocument): Group {
-  const data = docData<Omit<Group, 'id'>>(doc);
-  return { id: doc.document_id, ...data };
-}
-
-export function parseExpense(doc: AppDocument): Expense {
-  const data = docData<Omit<Expense, 'id'>>(doc);
-  return { id: doc.document_id, ...data };
-}
-
-export function parseMember(doc: AppDocument): GroupMember {
-  const data = docData<GroupMember>(doc);
-  return {
-    ...data,
-    uid: data.uid ?? doc.document_id.split('__').pop() ?? doc.document_id,
+function poll<T>(
+  fetcher: () => Promise<T>,
+  onUpdate: (data: T) => void,
+  onError?: (error: unknown) => void,
+): () => void {
+  let lastSnapshot: string | null = null;
+  const tick = () => {
+    void fetcher()
+      .then((data) => {
+        const snapshot = JSON.stringify(data);
+        if (snapshot === lastSnapshot) return;
+        lastSnapshot = snapshot;
+        onUpdate(data);
+      })
+      .catch((error) => onError?.(error));
   };
-}
-
-export async function listUserGroups(
-  db: ApexStreamDatabase,
-  userId: string,
-): Promise<Group[]> {
-  const docs = await db.collection(COLLECTIONS.groups).list(LIST_LIMIT);
-  return docs
-    .map(parseGroup)
-    .filter((g) => g.memberIds.includes(userId))
-    .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-}
-
-export async function listGroupExpenses(
-  db: ApexStreamDatabase,
-  groupId: string,
-): Promise<Expense[]> {
-  const docs = await db.collection(COLLECTIONS.expenses).list(LIST_LIMIT);
-  return docs
-    .map(parseExpense)
-    .filter((e) => e.groupId === groupId)
-    .sort((a, b) => toMillis(b.date) - toMillis(a.date));
-}
-
-export async function listGroupMembers(
-  db: ApexStreamDatabase,
-  groupId: string,
-): Promise<GroupMember[]> {
-  const docs = await db.collection(COLLECTIONS.members).list(LIST_LIMIT);
-  return docs
-    .map(parseMember)
-    .filter((m) => m.groupId === groupId)
-    .sort((a, b) => toMillis(a.joinedAt) - toMillis(b.joinedAt));
+  tick();
+  const id = window.setInterval(tick, POLL_INTERVAL_MS);
+  return () => window.clearInterval(id);
 }
 
 export function subscribeToUserGroups(
-  db: ApexStreamDatabase,
   userId: string,
   onUpdate: (groups: Group[]) => void,
   onError?: (error: unknown) => void,
 ): () => void {
-  const refresh = () => {
-    void listUserGroups(db, userId)
-      .then(onUpdate)
-      .catch((error) => onError?.(error));
-  };
-
-  refresh();
-  const unsubGroups = db.collection(COLLECTIONS.groups).onChange(() => refresh());
-  const unsubMembers = db.collection(COLLECTIONS.members).onChange(() => refresh());
-
-  return () => {
-    unsubGroups();
-    unsubMembers();
-  };
+  return poll(() => listUserGroups(userId), onUpdate, onError);
 }
 
 export function subscribeToGroup(
-  db: ApexStreamDatabase,
   groupId: string,
   onUpdate: (group: Group | null) => void,
   onError?: (error: unknown) => void,
 ): () => void {
-  const refresh = async () => {
-    try {
-      const doc = await db.collection(COLLECTIONS.groups).doc(groupId).get();
-      onUpdate(parseGroup(doc));
-    } catch {
-      onUpdate(null);
-    }
-  };
-
-  refresh().catch((error) => onError?.(error));
-  return db.collection(COLLECTIONS.groups).onChange((ev) => {
-    if (ev.id === groupId) {
-      void refresh();
-    }
-  });
+  return poll(() => getGroup(groupId), onUpdate, onError);
 }
 
 export function subscribeToGroupExpenses(
-  db: ApexStreamDatabase,
   groupId: string,
   onUpdate: (expenses: Expense[]) => void,
   onError?: (error: unknown) => void,
 ): () => void {
-  const refresh = () => {
-    void listGroupExpenses(db, groupId)
-      .then(onUpdate)
-      .catch((error) => onError?.(error));
-  };
-
-  refresh();
-  return db.collection(COLLECTIONS.expenses).onChange(() => refresh());
+  return poll(() => listGroupExpenses(groupId), onUpdate, onError);
 }
 
 export function subscribeToGroupMembers(
-  db: ApexStreamDatabase,
   groupId: string,
   onUpdate: (members: GroupMember[]) => void,
   onError?: (error: unknown) => void,
 ): () => void {
-  const refresh = () => {
-    void listGroupMembers(db, groupId)
-      .then(onUpdate)
-      .catch((error) => onError?.(error));
-  };
+  return poll(() => listGroupMembers(groupId), onUpdate, onError);
+}
 
-  refresh();
-  return db.collection(COLLECTIONS.members).onChange(() => refresh());
+export function subscribeToGroupParticipants(
+  groupId: string,
+  onUpdate: (participants: Participant[]) => void,
+  onError?: (error: unknown) => void,
+): () => void {
+  return poll(() => listGroupParticipants(groupId), onUpdate, onError);
+}
+
+export function subscribeToGroupIncomes(
+  groupId: string,
+  onUpdate: (incomes: Income[]) => void,
+  onError?: (error: unknown) => void,
+): () => void {
+  return poll(() => listGroupIncomes(groupId), onUpdate, onError);
 }
 
 export async function createGroup(
-  accessToken: string,
   user: AppUser,
   input: {
-    name: string;
+    month: number;
+    year: number;
     description?: string;
-    type: Group['type'];
     maxBudget?: number;
-    budgetType?: Group['budgetType'];
   },
 ): Promise<string> {
-  const groupId = crypto.randomUUID();
-  const createdAt = nowIso();
-
-  const group: Omit<Group, 'id'> = {
-    name: input.name,
-    description: input.description,
-    type: input.type,
-    createdBy: user.uid,
-    createdAt,
-    memberIds: [user.uid],
-    ...(input.maxBudget != null
-      ? { maxBudget: input.maxBudget, budgetType: input.budgetType ?? 'monthly' }
-      : {}),
-  };
-
-  await dbSet(accessToken, COLLECTIONS.groups, groupId, asRecord(group));
-  await dbSet(
-    accessToken,
-    COLLECTIONS.members,
-    memberDocId(groupId, user.uid),
-    asRecord({
-      groupId,
-      uid: user.uid,
-      role: 'admin',
-      joinedAt: createdAt,
-      displayName: user.displayName,
-      email: user.email,
+  const group = await apiFetch<Group>('/groups', {
+    method: 'POST',
+    body: JSON.stringify({
+      month: input.month,
+      year: input.year,
+      description: input.description,
+      maxBudget: input.maxBudget,
     }),
-  );
-
-  return groupId;
+  });
+  return group.id;
 }
 
 export async function updateGroup(
-  accessToken: string,
   groupId: string,
-  data: Partial<Pick<Group, 'name' | 'description' | 'maxBudget' | 'budgetType'>>,
+  data: Partial<
+    Pick<Group, 'name' | 'description' | 'maxBudget' | 'budgetType' | 'month' | 'year'>
+  >,
 ): Promise<void> {
-  await dbPatch(accessToken, COLLECTIONS.groups, groupId, data);
+  await apiFetch(`/groups/${encodeURIComponent(groupId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
 }
 
-export async function deleteGroup(
-  db: ApexStreamDatabase,
-  accessToken: string,
-  groupId: string,
-): Promise<void> {
-  const [expenses, members] = await Promise.all([
-    listGroupExpenses(db, groupId),
-    listGroupMembers(db, groupId),
-  ]);
+export async function deleteGroup(groupId: string): Promise<void> {
+  await apiFetch(`/groups/${encodeURIComponent(groupId)}`, {
+    method: 'DELETE',
+  });
+}
 
-  await Promise.all([
-    ...expenses.map((e) => dbDelete(accessToken, COLLECTIONS.expenses, e.id)),
-    ...members.map((m) =>
-      dbDelete(accessToken, COLLECTIONS.members, memberDocId(groupId, m.uid)),
-    ),
-    dbDelete(accessToken, COLLECTIONS.groups, groupId),
-  ]);
+export async function addParticipant(
+  groupId: string,
+  input: { name: string; email?: string },
+): Promise<Participant> {
+  return apiFetch<Participant>(
+    `/groups/${encodeURIComponent(groupId)}/participants`,
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function deleteParticipant(participantId: string): Promise<void> {
+  await apiFetch(`/participants/${encodeURIComponent(participantId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function createIncome(
+  groupId: string,
+  input: {
+    participantId: string;
+    amount: number;
+    source: string;
+    date: Date;
+  },
+): Promise<Income> {
+  const income = await apiFetch<Income>(
+    `/groups/${encodeURIComponent(groupId)}/incomes`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        participantId: input.participantId,
+        amount: input.amount,
+        source: input.source.trim(),
+        date: dateToIso(input.date),
+      }),
+    },
+  );
+  return income;
+}
+
+export async function updateIncome(
+  incomeId: string,
+  data: Partial<
+    Pick<Income, 'amount' | 'source' | 'date' | 'participantId'>
+  >,
+): Promise<void> {
+  await apiFetch(`/incomes/${encodeURIComponent(incomeId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteIncome(incomeId: string): Promise<void> {
+  await apiFetch(`/incomes/${encodeURIComponent(incomeId)}`, {
+    method: 'DELETE',
+  });
 }
 
 export async function createExpense(
-  accessToken: string,
   groupId: string,
   user: AppUser,
   input: {
@@ -271,50 +234,45 @@ export async function createExpense(
     date: Date;
   },
 ): Promise<string> {
-  const expenseId = crypto.randomUUID();
-  const createdAt = nowIso();
-
-  const expense: Omit<Expense, 'id'> = {
-    groupId,
-    amount: input.amount,
-    description: input.description.trim(),
-    category: input.category,
-    paidBy: user.uid,
-    date: dateToIso(input.date),
-    createdAt,
-    splitType: 'equal',
-  };
-
-  await dbSet(accessToken, COLLECTIONS.expenses, expenseId, asRecord(expense));
-  return expenseId;
+  const expense = await apiFetch<Expense>(
+    `/groups/${encodeURIComponent(groupId)}/expenses`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        amount: input.amount,
+        description: input.description.trim(),
+        category: input.category,
+        date: dateToIso(input.date),
+      }),
+    },
+  );
+  return expense.id;
 }
 
 export async function updateExpense(
-  accessToken: string,
   expenseId: string,
   data: Partial<Pick<Expense, 'amount' | 'description' | 'category' | 'date'>>,
 ): Promise<void> {
-  await dbPatch(accessToken, COLLECTIONS.expenses, expenseId, data);
+  await apiFetch(`/expenses/${encodeURIComponent(expenseId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
 }
 
-export async function deleteExpense(
-  accessToken: string,
-  expenseId: string,
-): Promise<void> {
-  await dbDelete(accessToken, COLLECTIONS.expenses, expenseId);
+export async function deleteExpense(expenseId: string): Promise<void> {
+  await apiFetch(`/expenses/${encodeURIComponent(expenseId)}`, {
+    method: 'DELETE',
+  });
 }
 
-export async function resetDemoUserData(
-  db: ApexStreamDatabase,
-  accessToken: string,
-  userId: string,
-): Promise<void> {
-  const groups = await listUserGroups(db, userId);
-  const owned = groups.filter((g) => g.createdBy === userId);
-  await Promise.all(owned.map((g) => deleteGroup(db, accessToken, g.id)));
-  await dbPatch(accessToken, COLLECTIONS.users, userId, { createdAt: nowIso() });
+export async function resetDemoUserData(userId: string): Promise<void> {
+  await apiFetch('/users/me/reset-demo', { method: 'POST' });
+  void userId;
 }
 
-function toMillis(value: string): number {
-  return new Date(value).getTime();
+export async function getUserProfile(): Promise<UserProfile> {
+  const { profile } = await apiFetch<{ profile: UserProfile }>('/auth/me');
+  return profile;
 }
+
+export { nowIso };

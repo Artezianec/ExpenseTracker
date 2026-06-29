@@ -1,139 +1,88 @@
 #!/usr/bin/env node
 /**
- * End-to-end smoke test: auth → create group → expense → delete → cleanup.
- * Requires ApexStream + Budget API running and .env.local filled in.
+ * Smoke test: register, login, create group, add expense.
+ * Requires Budget API + MySQL running and .env filled in.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
-import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { ApexStreamAuth } from '@apexstream/client';
+import path from 'node:path';
 
-const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-
-function loadEnvFile(filePath) {
-  const env = {};
-  if (!existsSync(filePath)) return env;
-  for (const line of readFileSync(filePath, 'utf8').split(/\r?\n/)) {
-    let s = line.trim();
-    if (!s || s.startsWith('#')) continue;
-    const eq = s.indexOf('=');
-    if (eq <= 0) continue;
-    env[s.slice(0, eq).trim()] = s
-      .slice(eq + 1)
-      .trim()
-      .replace(/^["']|["']$/g, '');
+function loadEnv() {
+  const env = { ...process.env };
+  const root = path.dirname(fileURLToPath(import.meta.url));
+  for (const file of ['../.env.local', '../.env']) {
+    try {
+      const raw = readFileSync(path.join(root, file), 'utf8');
+      for (const line of raw.split(/\r?\n/)) {
+        let s = line.trim();
+        if (!s || s.startsWith('#')) continue;
+        const eq = s.indexOf('=');
+        if (eq <= 0) continue;
+        const key = s.slice(0, eq).trim();
+        let val = s.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+        if (!env[key]) env[key] = val;
+      }
+    } catch {
+      /* optional */
+    }
   }
   return env;
 }
 
-const env = {
-  ...loadEnvFile(path.join(root, '.env')),
-  ...loadEnvFile(path.join(root, '.env.local')),
-  ...process.env,
-};
+const env = loadEnv();
+const base = `http://localhost:${env.BUDGET_API_PORT ?? '3001'}/api`;
+const email = `test-${Date.now()}@example.com`;
+const password = 'testpass123';
 
-const controlPlaneUrl = (
-  env.APEXSTREAM_CONTROL_PLANE_URL ??
-  env.VITE_APEXSTREAM_CONTROL_PLANE_URL ??
-  'http://localhost:8080'
-).replace(/\/$/, '');
-
-const appId = env.VITE_APEXSTREAM_APP_ID?.trim();
-const publishableKey = env.VITE_APEXSTREAM_PUBLISHABLE_KEY?.trim();
-const budgetApi = `http://127.0.0.1:${env.BUDGET_API_PORT ?? '3001'}`;
-
-if (!appId || !publishableKey) {
-  console.error('Set VITE_APEXSTREAM_APP_ID and VITE_APEXSTREAM_PUBLISHABLE_KEY in .env.local');
-  process.exit(1);
-}
-
-const auth = new ApexStreamAuth({ controlPlaneUrl, appId, publishableKey });
-
-const testEmail = `smoke-${Date.now()}@budgeted.test`;
-const testPassword = 'SmokeTest123!';
-
-async function api(method, collection, id, accessToken, body) {
-  const url = `${budgetApi}/api/db/collections/${encodeURIComponent(collection)}/documents/${encodeURIComponent(id)}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: body ? JSON.stringify({ data: body }) : undefined,
+async function api(path, options = {}) {
+  const res = await fetch(`${base}${path}`, {
+    headers: { 'Content-Type': 'application/json', ...options.headers },
+    ...options,
   });
-  if (!res.ok && method !== 'DELETE') {
-    const payload = await res.json().catch(() => ({}));
-    throw new Error(payload.error ?? res.statusText);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? res.statusText);
   }
+  if (res.status === 204) return null;
+  return res.json();
 }
 
-function step(name) {
-  console.log(`\n→ ${name}`);
-}
+console.log('→ Register');
+await api('/auth/register', {
+  method: 'POST',
+  body: JSON.stringify({ email, password }),
+});
 
-try {
-  step('Sign up');
-  let session;
-  try {
-    session = await auth.signUp(testEmail, testPassword);
-  } catch {
-    session = null;
-  }
+console.log('→ Login');
+const { token } = await api('/auth/login', {
+  method: 'POST',
+  body: JSON.stringify({ email, password }),
+});
 
-  step('Sign in');
-  session = await auth.signInWithPassword(testEmail, testPassword);
-  const token = session.accessToken;
-  const userId = session.user.id;
-  console.log(`   user: ${userId.slice(0, 8)}…`);
+const auth = { Authorization: `Bearer ${token}` };
 
-  step('Create group via Budget API');
-  const groupId = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await api('PUT', 'groups', groupId, token, {
-    name: 'Smoke Test Group',
-    type: 'personal',
-    createdBy: userId,
-    createdAt: now,
-    memberIds: [userId],
-  });
-  await api('PUT', 'members', `${groupId}__${userId}`, token, {
-    groupId,
-    uid: userId,
-    role: 'admin',
-    joinedAt: now,
-    email: testEmail,
-  });
-  console.log(`   group: ${groupId}`);
+console.log('→ Create group');
+const group = await api('/groups', {
+  method: 'POST',
+  headers: auth,
+  body: JSON.stringify({ name: 'Smoke Test Group', type: 'household' }),
+});
 
-  step('Create expense');
-  const expenseId = crypto.randomUUID();
-  await api('PUT', 'expenses', expenseId, token, {
-    groupId,
+console.log('→ Add expense');
+await api(`/groups/${group.id}/expenses`, {
+  method: 'POST',
+  headers: auth,
+  body: JSON.stringify({
     amount: 42.5,
-    description: 'Smoke test coffee',
+    description: 'Coffee',
     category: 'Food',
-    paidBy: userId,
-    date: now,
-    createdAt: now,
-    splitType: 'equal',
-  });
-  console.log(`   expense: ${expenseId}`);
+    date: new Date().toISOString(),
+  }),
+});
 
-  step('Patch expense');
-  await api('PATCH', 'expenses', expenseId, token, { amount: 43 });
+console.log('→ List expenses');
+const expenses = await api(`/groups/${group.id}/expenses`, { headers: auth });
+if (!expenses.length) throw new Error('expected expenses');
 
-  step('Delete expense + group');
-  await api('DELETE', 'expenses', expenseId, token);
-  await api('DELETE', 'members', `${groupId}__${userId}`, token);
-  await api('DELETE', 'groups', groupId, token);
-
-  step('Sign out');
-  await auth.signOut();
-
-  console.log('\n✓ Smoke test passed');
-} catch (error) {
-  console.error('\n✗ Smoke test failed:', error instanceof Error ? error.message : error);
-  process.exit(1);
-}
+console.log('\n✓ Smoke test passed');

@@ -16,6 +16,8 @@ export default defineConfig(({mode}) => {
       },
     },
     server: {
+      host: '0.0.0.0',
+      ...(env.VITE_DEV_HTTPS === 'true' ? { https: {} } : {}),
       hmr: process.env.DISABLE_HMR !== 'true',
       proxy: {
         '/api': {

@@ -4,15 +4,17 @@
  */
 
 import React from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
-import { ApexStreamProvider, useApexStream } from './contexts/ApexStreamContext';
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { CategoriesProvider } from './contexts/CategoriesContext';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import BudgetedApp from './BudgetedApp';
 import { Loader2 } from 'lucide-react';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useApexStream();
+  const { user, loading } = useAuth();
+  const location = useLocation();
 
   if (loading) {
     return (
@@ -23,10 +25,10 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   }
 
   if (!user) {
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/login" replace state={{ from: location }} />;
   }
 
-  return <>{children}</>;
+  return <CategoriesProvider>{children}</CategoriesProvider>;
 }
 
 function AppRoutes() {
@@ -48,8 +50,8 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <ApexStreamProvider>
+    <AuthProvider>
       <AppRoutes />
-    </ApexStreamProvider>
+    </AuthProvider>
   );
 }

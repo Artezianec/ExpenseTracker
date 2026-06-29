@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+server/uploads/
+data/supermarket-dumps/
+dumps/
+.venv/
